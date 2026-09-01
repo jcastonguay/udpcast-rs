@@ -205,14 +205,18 @@ pub fn msleep(ms: u64) {
 /// Parse a command string like "/bin/gzip -c" into a Vec of CStrings
 /// suitable for execvp.
 pub fn parse_command(cmd: &str) -> Vec<std::ffi::OsString> {
-    cmd.split_whitespace().map(std::ffi::OsString::from).collect()
+    cmd.split_whitespace()
+        .map(std::ffi::OsString::from)
+        .collect()
 }
 
 /// Timestamp (seconds since process start) for debug logging.
 pub fn dbg_stamp() -> f64 {
     use std::sync::OnceLock;
     static T0: OnceLock<std::time::Instant> = OnceLock::new();
-    T0.get_or_init(std::time::Instant::now).elapsed().as_secs_f64()
+    T0.get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_secs_f64()
 }
 
 /// `UDPC_DEBUG=1` switches on the verbose protocol tracing.

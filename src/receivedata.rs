@@ -1,10 +1,10 @@
-use std::net::{SocketAddrV4, UdpSocket};
-use std::os::unix::io::{AsFd, AsRawFd};
-use std::time::{Duration, Instant};
 use crate::fifo::Fifo;
 use crate::protocol;
 use crate::socklib;
 use crate::statistics::ReceiverStats;
+use std::net::{SocketAddrV4, UdpSocket};
+use std::os::unix::io::{AsFd, AsRawFd};
+use std::time::{Duration, Instant};
 
 const MAX_SLICE_SIZE: usize = 1024;
 const BITS_PER_CHAR: usize = 8;
@@ -100,7 +100,9 @@ pub fn spawn_net_receiver(
     net_config: &crate::senddata::NetConfig,
     stats: &mut ReceiverStats,
 ) {
-    let mut slices: Vec<Slice> = (0..NR_SLICES).map(|_| Slice::new(net_config.block_size)).collect();
+    let mut slices: Vec<Slice> = (0..NR_SLICES)
+        .map(|_| Slice::new(net_config.block_size))
+        .collect();
 
     // Late-join: pre-seed the slice table with the slices the sender had
     // already sent when our (re)sent CONNECT_REPLY finally arrived. Each
@@ -160,7 +162,8 @@ pub fn spawn_net_receiver(
             }
         }
 
-        let (n, _from) = match poller.next(&mut client_config.socks, &mut buf, net_config.port_base) {
+        let (n, _from) = match poller.next(&mut client_config.socks, &mut buf, net_config.port_base)
+        {
             Some(r) => {
                 last_activity = Instant::now();
                 if end_reached {
@@ -196,12 +199,23 @@ pub fn spawn_net_receiver(
                 if crate::util::dbg_on() && msg.block_no == 0 {
                     crate::util::flprintf(&format!(
                         "DBG {:.3} rx DATA no={} bytes={}\n",
-                        crate::util::dbg_stamp(), msg.slice_no, msg.bytes
+                        crate::util::dbg_stamp(),
+                        msg.slice_no,
+                        msg.bytes
                     ));
                 }
                 stats.start_timer();
                 client_config.is_started = true;
-                process_data_block(&mut slices, &mut current_slice, &mut current_slice_no, fifo, net_config, client_config, &msg, &buf[protocol::DATA_BLOCK_SIZE..n]);
+                process_data_block(
+                    &mut slices,
+                    &mut current_slice,
+                    &mut current_slice_no,
+                    fifo,
+                    net_config,
+                    client_config,
+                    &msg,
+                    &buf[protocol::DATA_BLOCK_SIZE..n],
+                );
             }
             protocol::CMD_FEC => {
                 if n < protocol::FEC_BLOCK_SIZE {
@@ -210,7 +224,14 @@ pub fn spawn_net_receiver(
                 let msg = protocol::FecBlock::unpack(&buf);
                 stats.start_timer();
                 client_config.is_started = true;
-                process_fec_block(&mut slices, fifo, net_config, client_config, &msg, &buf[protocol::FEC_BLOCK_SIZE..n]);
+                process_fec_block(
+                    &mut slices,
+                    fifo,
+                    net_config,
+                    client_config,
+                    &msg,
+                    &buf[protocol::FEC_BLOCK_SIZE..n],
+                );
             }
             protocol::CMD_REQACK => {
                 if n < protocol::REQACK_SIZE {
@@ -344,7 +365,12 @@ impl RxPoller {
     }
 }
 
-fn find_slice(slices: &mut [Slice], current_slice: Option<usize>, _current_slice_no: i32, slice_no: i32) -> Option<usize> {
+fn find_slice(
+    slices: &mut [Slice],
+    current_slice: Option<usize>,
+    _current_slice_no: i32,
+    slice_no: i32,
+) -> Option<usize> {
     if let Some(idx) = current_slice {
         if slices[idx].slice_no == slice_no {
             return Some(idx);
@@ -361,13 +387,16 @@ fn find_slice(slices: &mut [Slice], current_slice: Option<usize>, _current_slice
 fn new_slice(slices: &mut [Slice], fifo: &Fifo, slice_no: i32, block_size: u32) -> Option<usize> {
     // Prefer a genuinely free slot; otherwise recycle a completed slice whose
     // data has already been handed to the writer.
-    let idx = slices.iter().position(|s| s.state == SliceState::Free)
+    let idx = slices
+        .iter()
+        .position(|s| s.state == SliceState::Free)
         .or_else(|| slices.iter().position(|s| s.state == SliceState::Done));
     let i = idx?;
     // Wait for enough free memory for a worst-case slice before claiming the
     // base position, like C's newSlice; otherwise concurrently in-flight
     // slices would share the same fifo region.
-    fifo.free_mem_queue.consume(block_size as usize * MAX_SLICE_SIZE);
+    fifo.free_mem_queue
+        .consume(block_size as usize * MAX_SLICE_SIZE);
     let s = &mut slices[i];
     s.magic = SLICEMAGIC;
     s.state = SliceState::Receiving;
@@ -482,13 +511,20 @@ fn process_fec_block(
     check_slice_complete(slices, slice_idx, fifo, net_config, client_config);
 }
 
-fn check_slice_complete(slices: &mut [Slice], slice_idx: usize, fifo: &Fifo, net_config: &crate::senddata::NetConfig, client_config: &mut ClientConfig) {
+fn check_slice_complete(
+    slices: &mut [Slice],
+    slice_idx: usize,
+    fifo: &Fifo,
+    net_config: &crate::senddata::NetConfig,
+    client_config: &mut ClientConfig,
+) {
     let slice = &mut slices[slice_idx];
     if !slice.bytes_known || slice.bytes == 0 {
         return;
     }
 
-    let blocks_in_slice = (slice.bytes + net_config.block_size as usize - 1) / net_config.block_size as usize;
+    let blocks_in_slice =
+        (slice.bytes + net_config.block_size as usize - 1) / net_config.block_size as usize;
 
     if slice.data_blocks_transferred >= blocks_in_slice {
         complete_slice(slices, slice_idx, fifo, net_config, client_config);
@@ -503,7 +539,13 @@ fn check_slice_complete(slices: &mut [Slice], slice_idx: usize, fifo: &Fifo, net
     }
 }
 
-fn try_fec_recover(slices: &mut [Slice], slice_idx: usize, fifo: &Fifo, net_config: &crate::senddata::NetConfig, client_config: &mut ClientConfig) {
+fn try_fec_recover(
+    slices: &mut [Slice],
+    slice_idx: usize,
+    fifo: &Fifo,
+    net_config: &crate::senddata::NetConfig,
+    client_config: &mut ClientConfig,
+) {
     let block_size = net_config.block_size as usize;
 
     let slice = &mut slices[slice_idx];
@@ -559,7 +601,8 @@ fn try_fec_recover(slices: &mut [Slice], slice_idx: usize, fifo: &Fifo, net_conf
                 fifo.read_at(start, &mut data_blocks[j]);
             }
         }
-        let mut data_ptrs: Vec<&mut [u8]> = data_blocks.iter_mut().map(|b| b.as_mut_slice()).collect();
+        let mut data_ptrs: Vec<&mut [u8]> =
+            data_blocks.iter_mut().map(|b| b.as_mut_slice()).collect();
 
         let ok = crate::fec::fec_decode(block_size, &mut data_ptrs, &fec_sel, &fec_nos, &erased);
         if !ok {
@@ -584,7 +627,13 @@ fn try_fec_recover(slices: &mut [Slice], slice_idx: usize, fifo: &Fifo, net_conf
     }
 }
 
-fn complete_slice(slices: &mut [Slice], slice_idx: usize, fifo: &Fifo, _net_config: &crate::senddata::NetConfig, client_config: &mut ClientConfig) {
+fn complete_slice(
+    slices: &mut [Slice],
+    slice_idx: usize,
+    fifo: &Fifo,
+    _net_config: &crate::senddata::NetConfig,
+    client_config: &mut ClientConfig,
+) {
     let slice = &mut slices[slice_idx];
     if slice.state == SliceState::Done {
         return;
@@ -599,7 +648,9 @@ fn complete_slice(slices: &mut [Slice], slice_idx: usize, fifo: &Fifo, _net_conf
     // the sender's OK handling is idempotent, so the extra copy is harmless
     // to C senders.
     if (slice.slice_no as usize) >= client_config.completed_slices.len() {
-        client_config.completed_slices.resize(slice.slice_no as usize + 1, false);
+        client_config
+            .completed_slices
+            .resize(slice.slice_no as usize + 1, false);
     }
     client_config.completed_slices[slice.slice_no as usize] = true;
     if slice.bytes > 0 {
@@ -629,7 +680,9 @@ fn complete_slice(slices: &mut [Slice], slice_idx: usize, fifo: &Fifo, _net_conf
             ));
         }
     }
-    let ok_msg = protocol::OkMsg { slice_no: slice.slice_no };
+    let ok_msg = protocol::OkMsg {
+        slice_no: slice.slice_no,
+    };
     let packed = ok_msg.pack();
     if let Some(sock) = &client_config.socks[0] {
         send_answer(sock, &packed, &client_config.server_addr, "OK");
@@ -649,9 +702,7 @@ fn send_answer(sock: &UdpSocket, packed: &[u8], dest: &SocketAddrV4, what: &str)
                 crate::util::flprintf(&format!(
                     "Failed to send {} to {}: {}
 ",
-                    what,
-                    dest,
-                    e
+                    what, dest, e
                 ));
             }
         }
@@ -674,7 +725,9 @@ fn process_reqack(
                 // or slow) receivers.  Answering OK keeps us out of the
                 // retransmit union; re-creating the slice would re-request a
                 // region of the file we already have.
-                let ok_msg = protocol::OkMsg { slice_no: msg.slice_no };
+                let ok_msg = protocol::OkMsg {
+                    slice_no: msg.slice_no,
+                };
                 let packed = ok_msg.pack();
                 if let Some(sock) = &client_config.socks[0] {
                     send_answer(sock, &packed, &client_config.server_addr, "OK");
@@ -689,7 +742,9 @@ fn process_reqack(
             match new_slice(slices, fifo, msg.slice_no, net_config.block_size) {
                 Some(idx) => idx,
                 None => {
-                    let ok_msg = protocol::OkMsg { slice_no: msg.slice_no };
+                    let ok_msg = protocol::OkMsg {
+                        slice_no: msg.slice_no,
+                    };
                     let packed = ok_msg.pack();
                     if let Some(sock) = &client_config.socks[0] {
                         send_answer(sock, &packed, &client_config.server_addr, "OK");
@@ -712,14 +767,23 @@ fn process_reqack(
     if crate::util::dbg_on() {
         crate::util::flprintf(&format!(
             "DBG {:.3} rx REQACK no={} bytes={} have={}/{} -> {}\n",
-            crate::util::dbg_stamp(), msg.slice_no, slices[slice_idx].bytes,
-            slices[slice_idx].data_blocks_transferred, blocks_in_slice,
-            if slices[slice_idx].data_blocks_transferred >= blocks_in_slice { "OK" } else { "RETR" }
+            crate::util::dbg_stamp(),
+            msg.slice_no,
+            slices[slice_idx].bytes,
+            slices[slice_idx].data_blocks_transferred,
+            blocks_in_slice,
+            if slices[slice_idx].data_blocks_transferred >= blocks_in_slice {
+                "OK"
+            } else {
+                "RETR"
+            }
         ));
     }
 
     if slices[slice_idx].data_blocks_transferred >= blocks_in_slice {
-        let ok_msg = protocol::OkMsg { slice_no: msg.slice_no };
+        let ok_msg = protocol::OkMsg {
+            slice_no: msg.slice_no,
+        };
         let packed = ok_msg.pack();
         if let Some(sock) = &client_config.socks[0] {
             send_answer(sock, &packed, &client_config.server_addr, "OK");
@@ -746,7 +810,10 @@ fn process_reqack(
     }
 }
 
-pub fn send_connect_req(client_config: &mut ClientConfig, _net_config: &crate::senddata::NetConfig) {
+pub fn send_connect_req(
+    client_config: &mut ClientConfig,
+    _net_config: &crate::senddata::NetConfig,
+) {
     let msg = protocol::ConnectReq {
         capabilities: protocol::RECEIVER_CAPABILITIES,
         rcvbuf: crate::socklib::get_rcv_buf(client_config.socks[0].as_ref().unwrap()),
@@ -794,7 +861,11 @@ pub fn send_disconnect(client_config: &mut ClientConfig, exit_status: i32) {
         // sender is shutting the transfer down anyway); a failing exit
         // retransmits, because the sender must drop us now or it would
         // stall every slice until its retry-until-drop budget runs out.
-        let rounds = if exit_status == 0 { 1 } else { DISCONNECT_RETRIES };
+        let rounds = if exit_status == 0 {
+            1
+        } else {
+            DISCONNECT_RETRIES
+        };
         for i in 0..rounds {
             for k in 0..n_dests {
                 let Some(d) = dests[k] else { continue };

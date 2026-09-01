@@ -71,7 +71,11 @@ struct Cli {
     #[arg(long = "no-progress")]
     no_progress: bool,
 
-    #[arg(short = 'x', long = "print-uncompressed-position", default_value = "-1")]
+    #[arg(
+        short = 'x',
+        long = "print-uncompressed-position",
+        default_value = "-1"
+    )]
     print_uncompressed_pos: i32,
 
     #[arg(short = 'z', long = "stat-period", default_value = "0")]
@@ -328,13 +332,14 @@ fn start_receiver(
     // The group the sniffer is currently joined to. The sender may use a
     // non-default data group (-m); the HELLO on the control channel says
     // which, so the sniffer is re-aimed when one arrives.
-    let mut sniff_group = s_sniff
-        .as_ref()
-        .and_then(|s| s.local_addr().ok())
-        .and_then(|a| match a {
-            std::net::SocketAddr::V4(v4) => Some(*v4.ip()),
-            _ => None,
-        });
+    let mut sniff_group =
+        s_sniff
+            .as_ref()
+            .and_then(|s| s.local_addr().ok())
+            .and_then(|a| match a {
+                std::net::SocketAddr::V4(v4) => Some(*v4.ip()),
+                _ => None,
+            });
 
     crate::util::flprintf(&format!(
         "{}UDP receiver for {} at {} on {}\n",
@@ -343,10 +348,7 @@ fn start_receiver(
         } else {
             ""
         },
-        disk_config
-            .file_name
-            .as_deref()
-            .unwrap_or("(stdout)"),
+        disk_config.file_name.as_deref().unwrap_or("(stdout)"),
         net_if.addr,
         net_if.name
     ));
@@ -426,7 +428,12 @@ fn start_receiver(
         };
         let timeout = Some(timeout);
 
-        let (msglen, from) = match recv_from_any_negotiate(&client_config.socks, &mut buf, net_config.port_base, timeout) {
+        let (msglen, from) = match recv_from_any_negotiate(
+            &client_config.socks,
+            &mut buf,
+            net_config.port_base,
+            timeout,
+        ) {
             Some(r) => {
                 last_activity = Instant::now();
                 r
@@ -524,13 +531,14 @@ fn start_receiver(
                         Some(&want),
                         socklib::RECEIVER_PORT(net_config.port_base),
                     );
-                    sniff_group = s_sniff
-                        .as_ref()
-                        .and_then(|s| s.local_addr().ok())
-                        .and_then(|a| match a {
-                            std::net::SocketAddr::V4(v4) => Some(*v4.ip()),
-                            _ => None,
-                        });
+                    sniff_group =
+                        s_sniff
+                            .as_ref()
+                            .and_then(|s| s.local_addr().ok())
+                            .and_then(|a| match a {
+                                std::net::SocketAddr::V4(v4) => Some(*v4.ip()),
+                                _ => None,
+                            });
                     if client_config.socks.len() > 3 {
                         if let Some(sn) = s_sniff.as_ref() {
                             if let Ok(c) = sn.try_clone() {
@@ -658,7 +666,11 @@ fn start_receiver(
     let fifo_clone = fifo.clone();
 
     let mut client_config_for_thread = ClientConfig {
-        socks: client_config.socks.iter().map(|s| s.as_ref().and_then(|orig| orig.try_clone().ok())).collect(),
+        socks: client_config
+            .socks
+            .iter()
+            .map(|s| s.as_ref().and_then(|orig| orig.try_clone().ok()))
+            .collect(),
         server_addr: client_config.server_addr,
         control_addr: client_config.control_addr,
         client_number: client_config.client_number,
@@ -688,7 +700,12 @@ fn start_receiver(
             print_uncompressed_pos,
             no_progress,
         );
-        receivedata::spawn_net_receiver(&fifo_clone, &mut client_config_for_thread, &net_config_clone, &mut stats_local);
+        receivedata::spawn_net_receiver(
+            &fifo_clone,
+            &mut client_config_for_thread,
+            &net_config_clone,
+            &mut stats_local,
+        );
         stats_local.display(true);
     });
 

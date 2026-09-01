@@ -226,18 +226,19 @@ fn invert_mat(src: &mut [u8], k: usize) -> i32 {
     0
 }
 
-pub fn fec_encode(
-    block_size: usize,
-    data_blocks: &[&[u8]],
-    fec_blocks: &mut [&mut [u8]],
-) {
+pub fn fec_encode(block_size: usize, data_blocks: &[&[u8]], fec_blocks: &mut [&mut [u8]]) {
     assert!(data_blocks.len() <= 128);
     assert!(fec_blocks.len() <= 128);
     if data_blocks.is_empty() {
         return;
     }
     for row in 0..fec_blocks.len() {
-        mul(fec_blocks[row], data_blocks[0], INVERSE[128 ^ row], block_size);
+        mul(
+            fec_blocks[row],
+            data_blocks[0],
+            INVERSE[128 ^ row],
+            block_size,
+        );
     }
     for (block_no, data_block) in data_blocks.iter().enumerate().skip(1) {
         let col = 128 + block_no;
@@ -293,7 +294,12 @@ pub fn fec_decode(
 
     for (row, &erased) in erased_blocks.iter().enumerate() {
         let target = &mut data_blocks[erased as usize];
-        mul(target, &reduced_fec[0], matrix[row * nr_fec_blocks], block_size);
+        mul(
+            target,
+            &reduced_fec[0],
+            matrix[row * nr_fec_blocks],
+            block_size,
+        );
         for col in 1..nr_fec_blocks {
             addmul(
                 target,
@@ -388,7 +394,7 @@ pub fn fec_license() {
 mod tests {
     use super::*;
 
-/// The compile-time tables must be bit-identical to what the C
+    /// The compile-time tables must be bit-identical to what the C
     /// `fec_init()` (generate_gf + init_mul_table) produces at runtime.
     /// The generator polynomial is the standard 0x11d (x^8+x^4+x^3+x^2+1),
     /// stored LSB-first in Rizzo's ALL_PP; the scan stops at i=8 so
@@ -516,8 +522,7 @@ mod tests {
         let mut fec = vec![vec![0u8; block_size]; stripes * redundancy];
         for stripe in 0..stripes {
             let positions: Vec<usize> = (stripe..nr_data).step_by(stripes).collect();
-            let data_ptrs: Vec<&[u8]> =
-                positions.iter().map(|&p| data[p].as_slice()).collect();
+            let data_ptrs: Vec<&[u8]> = positions.iter().map(|&p| data[p].as_slice()).collect();
             // Disjoint borrows in ascending index order: for this stripe the
             // parity indices stripe + r*stripes come out in r = 0,1,....
             let mut fec_ptrs: Vec<&mut [u8]> = fec
@@ -545,9 +550,8 @@ mod tests {
         // numbers the way the receiver does.
         for (stripe, es) in erased_by_stripe.iter().enumerate() {
             let nr_stripe = nr_data / stripes; // even interleave in this test
-            let mut data_blocks: Vec<Vec<u8>> = (0..nr_stripe)
-                .map(|_| vec![0u8; block_size])
-                .collect();
+            let mut data_blocks: Vec<Vec<u8>> =
+                (0..nr_stripe).map(|_| vec![0u8; block_size]).collect();
             for (j, p) in (stripe..nr_data).step_by(stripes).enumerate() {
                 if !es.contains(&j) {
                     data_blocks[j].copy_from_slice(&data[p]);
@@ -571,8 +575,7 @@ mod tests {
             for &j in es {
                 let p = stripe + j * stripes;
                 assert_eq!(
-                    data_blocks[j],
-                    original[p],
+                    data_blocks[j], original[p],
                     "erased global block {} not recovered",
                     p
                 );
@@ -591,14 +594,16 @@ mod tests {
         assert!(t.ends_with('\n'), "C output ends with a newline");
         assert_eq!(lines.len(), 54, "C prints 54 lines");
         assert_eq!(lines[0], "   udpcast and its FEC code are free software");
+        assert_eq!(lines[1], "", "second line is blank (C prints a blank line)");
         assert_eq!(
-            lines[1],
-            "",
-            "second line is blank (C prints a blank line)"
+            lines[15],
+            "   59 Temple Place - Suite 330, Boston, MA 02111-1307, USA."
         );
-        assert_eq!(lines[15], "   59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.");
         assert_eq!(lines[17], "   Alain Knaff");
-        assert_eq!(lines[21], "the FEC code is covered by the following license:");
+        assert_eq!(
+            lines[21],
+            "the FEC code is covered by the following license:"
+        );
         assert_eq!(
             lines[22],
             "fec.c -- forward error correction based on Vandermonde matrices"
@@ -618,7 +623,10 @@ mod tests {
             lines[32],
             "modification, are permitted provided that the following conditions"
         );
-        assert_eq!(lines[42], "THIS SOFTWARE IS PROVIDED BY THE AUTHORS ``AS IS'' AND");
+        assert_eq!(
+            lines[42],
+            "THIS SOFTWARE IS PROVIDED BY THE AUTHORS ``AS IS'' AND"
+        );
         assert_eq!(lines[53], "OF SUCH DAMAGE.");
 
         for needle in [

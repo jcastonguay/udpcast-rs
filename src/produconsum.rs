@@ -111,7 +111,13 @@ impl Produconsum {
         amount
     }
 
-    fn consume_any_inner(inner_guard: std::sync::MutexGuard<Inner>, cond: &Condvar, size: usize, min_amount: usize, deadline: Option<Instant>) -> usize {
+    fn consume_any_inner(
+        inner_guard: std::sync::MutexGuard<Inner>,
+        cond: &Condvar,
+        size: usize,
+        min_amount: usize,
+        deadline: Option<Instant>,
+    ) -> usize {
         let mut inner = inner_guard;
         inner.consumer_waiting = true;
         let mut amount = Self::get_produced_amount(&inner, size);

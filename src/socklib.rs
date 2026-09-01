@@ -1,6 +1,6 @@
-use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
-use std::io;
 use crate::util;
+use std::io;
+use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 
 pub const RECEIVER_PORT: fn(u16) -> u16 = |x| x;
 pub const SENDER_PORT: fn(u16) -> u16 = |x| x + 1;
@@ -24,9 +24,9 @@ pub fn make_sock_addr(hostname: &str, port: u16) -> io::Result<SocketAddrV4> {
     let addr: Ipv4Addr = if hostname.is_empty() {
         Ipv4Addr::UNSPECIFIED
     } else {
-        hostname.parse().map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidInput, "Invalid IP address")
-        })?
+        hostname
+            .parse()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid IP address"))?
     };
     Ok(SocketAddrV4::new(addr, port))
 }
@@ -65,11 +65,7 @@ pub fn do_receive(
     let (n, from) = sock.recv_from(buf)?;
     let port = from.port();
     if port != RECEIVER_PORT(port_base) && port != SENDER_PORT(port_base) {
-        eprintln!(
-            "Bad message from port {}:{}",
-            from.ip(),
-            port
-        );
+        eprintln!("Bad message from port {}:{}", from.ip(), port);
         return Err(io::Error::new(io::ErrorKind::InvalidData, "Bad port"));
     }
     let from_v4 = match from {
@@ -151,44 +147,23 @@ pub fn set_ttl(sock: &UdpSocket, ttl: i32) -> io::Result<()> {
 }
 
 /// Pick the outbound interface for multicast packets (`IP_MULTICAST_IF`).
-/// Mirrors C `socklib.c`'s `setMcastDestination()`/`fillMreq()`: the kernel
-/// selects the interface by `imr_ifindex`; the other two fields match C's
-/// `fillMreq()` layout (`imr_multiaddr` = the mcast address, `imr_address`
-/// = 0) and are ignored by the kernel when `imr_ifindex` is non-zero.
+/// Mirrors C `socklib.c`'s `setMcastDestination()`.
 ///
-/// No available crate (checked nix 0.31, rustix 1.1, socket2 0.6) wraps
-/// `IP_MULTICAST_IF`, so this stays a minimal direct `setsockopt`.
+/// The C original sends an `ip_mreqn` with `imr_ifindex` (the exact
+/// interface). Here we use socket2's `set_multicast_if_v4`, which passes the
+/// interface's IP address and lets the kernel resolve the device
+/// (`ip_dev_find`) — equivalent whenever that IP is not shared by several
+/// interfaces, and the whole thing is safe Rust; the kernel accepts the
+/// 4-byte form on all modern kernels (verified in v4.4 … v7.1 sources and on
+/// a live 7.1 kernel), and the resulting `mc_index` is what `udp.c` uses to
+/// pick the egress device for multicast sends.
 pub fn set_mcast_destination(
     sock: &UdpSocket,
     net_if: &NetIf,
-    addr: &SocketAddrV4,
+    _addr: &SocketAddrV4,
 ) -> io::Result<()> {
-    let mreqn = libc::ip_mreqn {
-        imr_multiaddr: libc::in_addr {
-            s_addr: u32::from_be_bytes(addr.ip().octets()),
-        },
-        imr_address: libc::in_addr {
-            s_addr: 0,
-        },
-        imr_ifindex: net_if.index,
-    };
-    // SAFETY: `IP_MULTICAST_IF` takes a fixed-size 20-byte `ip_mreqn` that
-    // contains no pointers; the struct is fully initialized above and stays
-    // alive for the duration of the call.
-    let ret = unsafe {
-        use std::os::unix::io::AsRawFd;
-        libc::setsockopt(
-            sock.as_raw_fd(),
-            libc::IPPROTO_IP,
-            libc::IP_MULTICAST_IF,
-            &mreqn as *const _ as *const libc::c_void,
-            std::mem::size_of::<libc::ip_mreqn>() as libc::socklen_t,
-        )
-    };
-    if ret != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+    let s: socket2::Socket = sock.try_clone()?.into();
+    s.set_multicast_if_v4(&net_if.addr)
 }
 
 pub fn is_full_duplex(_sock: &UdpSocket, _ifname: &str) -> i32 {
@@ -196,10 +171,12 @@ pub fn is_full_duplex(_sock: &UdpSocket, _ifname: &str) -> i32 {
 }
 
 pub fn get_net_if(wanted: Option<&str>) -> NetIf {
-    use std::collections::HashMap;
     use nix::ifaddrs::getifaddrs;
+    use std::collections::HashMap;
 
-    let wanted: Option<String> = wanted.map(|s| s.to_string()).or_else(|| std::env::var("IFNAME").ok());
+    let wanted: Option<String> = wanted
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("IFNAME").ok());
 
     let mut best_goodness = 0;
     let mut best_name = String::new();
@@ -226,8 +203,11 @@ pub fn get_net_if(wanted: Option<&str>) -> NetIf {
             .and_then(|b| b.as_sockaddr_in())
             .map(|s| s.ip())
             .unwrap_or(Ipv4Addr::UNSPECIFIED);
-        let idx = nix::net::if_::if_nametoindex(ifa.interface_name.as_str()).map(|i| i as i32).unwrap_or(0);
-        seen.entry(ifa.interface_name).or_insert((addr.ip(), bcast, idx));
+        let idx = nix::net::if_::if_nametoindex(ifa.interface_name.as_str())
+            .map(|i| i as i32)
+            .unwrap_or(0);
+        seen.entry(ifa.interface_name)
+            .or_insert((addr.ip(), bcast, idx));
     }
 
     if seen.is_empty() {
@@ -331,8 +311,8 @@ pub fn make_socket(
     if sock.bind(&socket2::SockAddr::from(bind_addr)).is_err() {
         #[cfg(any(target_os = "linux", target_os = "android"))]
         {
-            use nix::sys::socket::sockopt::ReusePort;
             use nix::sys::socket::setsockopt;
+            use nix::sys::socket::sockopt::ReusePort;
             let _ = setsockopt(&sock, ReusePort, &true);
         }
         sock.bind(&socket2::SockAddr::from(bind_addr)).ok()?;

@@ -1,0 +1,28 @@
+{
+  "markdown": {
+  },
+  "toml": {
+  },
+  "yaml": {
+  },
+  "exec": {
+    "cwd": "${configDir}",
+    "commands": [
+      {
+        "command": "rustfmt",
+        "exts": ["rs"]
+      },
+      {
+        "command": "shfmt",
+        "exts": ["sh", "bash"]
+      }
+    ]
+  },
+  "excludes": [],
+  "plugins": [
+    "https://plugins.dprint.dev/markdown-0.23.2.wasm",
+    "https://plugins.dprint.dev/toml-0.8.0.wasm",
+    "https://plugins.dprint.dev/g-plane/pretty_yaml-v0.6.0.wasm",
+    "https://plugins.dprint.dev/exec-0.7.3.json"
+  ]
+}

@@ -1,12 +1,12 @@
-use std::net::{SocketAddrV4, UdpSocket};
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
 use crate::participants::ParticipantsDb;
-use crate::protocol;
 use crate::produconsum::Produconsum;
-use crate::statistics::SenderStats;
+use crate::protocol;
 use crate::socklib;
+use crate::statistics::SenderStats;
+use std::net::{SocketAddrV4, UdpSocket};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 const MAX_SLICE_SIZE: usize = 1024;
 const BITS_PER_CHAR: usize = 8;
@@ -152,9 +152,19 @@ pub fn send_hello(net_config: &NetConfig, sock: &UdpSocket, streaming: bool) {
 }
 
 enum IncomingMsg {
-    Ok { slice_no: i32, cl_no: i32 },
-    Retransmit { slice_no: i32, cl_no: i32, map: [u8; 128], rxmit: i32 },
-    Disconnect { cl_no: i32 },
+    Ok {
+        slice_no: i32,
+        cl_no: i32,
+    },
+    Retransmit {
+        slice_no: i32,
+        cl_no: i32,
+        map: [u8; 128],
+        rxmit: i32,
+    },
+    Disconnect {
+        cl_no: i32,
+    },
 }
 
 struct ReturnChannel {
@@ -172,7 +182,9 @@ struct ReturnChannel {
 impl ReturnChannel {
     fn new() -> Self {
         Self {
-            msgs: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::with_capacity(QUEUE_SIZE))),
+            msgs: Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::with_capacity(QUEUE_SIZE),
+            )),
             wake: Arc::new(std::sync::Condvar::new()),
             stop: Arc::new(AtomicBool::new(false)),
             handle: None,
@@ -258,18 +270,28 @@ impl ReturnChannel {
                         let opcode = u16::from_be_bytes([buf[0], buf[1]]);
                         let msg = match opcode {
                             protocol::CMD_OK => {
-                                if n < protocol::OK_MSG_SIZE { continue; }
+                                if n < protocol::OK_MSG_SIZE {
+                                    continue;
+                                }
                                 let ok = protocol::OkMsg::unpack(&buf);
-                                IncomingMsg::Ok { slice_no: ok.slice_no, cl_no }
+                                IncomingMsg::Ok {
+                                    slice_no: ok.slice_no,
+                                    cl_no,
+                                }
                             }
                             protocol::CMD_RETRANSMIT => {
-                                if n < protocol::RETRANSMIT_SIZE { continue; }
+                                if n < protocol::RETRANSMIT_SIZE {
+                                    continue;
+                                }
                                 let rt = protocol::Retransmit::unpack(&buf);
-                                IncomingMsg::Retransmit { slice_no: rt.slice_no, cl_no, map: rt.map, rxmit: rt.rxmit }
+                                IncomingMsg::Retransmit {
+                                    slice_no: rt.slice_no,
+                                    cl_no,
+                                    map: rt.map,
+                                    rxmit: rt.rxmit,
+                                }
                             }
-                            protocol::CMD_DISCONNECT => {
-                                IncomingMsg::Disconnect { cl_no }
-                            }
+                            protocol::CMD_DISCONNECT => IncomingMsg::Disconnect { cl_no },
                             _ => continue,
                         };
 
@@ -434,7 +456,8 @@ pub fn spawn_net_sender(
     if net_config.flags & FLAG_FEC != 0 && net_config.slice_size > 128 * net_config.fec_stripes {
         net_config.slice_size = 128 * net_config.fec_stripes;
     }
-    if net_config.flags & FLAG_FEC != 0 && net_config.max_slice_size > net_config.fec_stripes * 128 {
+    if net_config.flags & FLAG_FEC != 0 && net_config.max_slice_size > net_config.fec_stripes * 128
+    {
         net_config.max_slice_size = net_config.fec_stripes * 128;
     }
     if net_config.slice_size > net_config.max_slice_size {
@@ -447,9 +470,7 @@ pub fn spawn_net_sender(
             continue;
         }
 
-        if !first_slice_acked
-            && last_reply_rexmit.elapsed() >= std::time::Duration::from_secs(1)
-        {
+        if !first_slice_acked && last_reply_rexmit.elapsed() >= std::time::Duration::from_secs(1) {
             last_reply_rexmit = std::time::Instant::now();
             let db_l = db.lock().unwrap();
             for i in 0..crate::participants::MAX_CLIENTS {
@@ -576,8 +597,10 @@ pub fn spawn_net_sender(
                 if crate::util::dbg_on() {
                     crate::util::flprintf(&format!(
                         "DBG {:.3} tx DATA no={} bytes={} base={}\n",
-                        crate::util::dbg_stamp(), slices[idx].slice_no,
-                        slices[idx].bytes, slices[idx].base
+                        crate::util::dbg_stamp(),
+                        slices[idx].slice_no,
+                        slices[idx].bytes,
+                        slices[idx].base
                     ));
                 }
                 send_slice(
@@ -655,11 +678,17 @@ pub fn spawn_net_sender(
                             continue;
                         }
                         if !bit_is_set(&slices[idx].answered_set, i) {
-                            not_answered.push_str(&format!("{}", if not_answered.is_empty() { "" } else { "," }));
+                            not_answered.push_str(&format!(
+                                "{}",
+                                if not_answered.is_empty() { "" } else { "," }
+                            ));
                             not_answered.push_str(&i.to_string());
                         }
                         if !bit_is_set(&slices[idx].ready_set, i) {
-                            not_ready.push_str(&format!("{}", if not_ready.is_empty() { "" } else { "," }));
+                            not_ready.push_str(&format!(
+                                "{}",
+                                if not_ready.is_empty() { "" } else { "," }
+                            ));
                             not_ready.push_str(&i.to_string());
                         }
                     }
@@ -686,8 +715,7 @@ pub fn spawn_net_sender(
                 {
                     let db_lock = db.lock().unwrap();
                     for i in 0..crate::participants::MAX_CLIENTS {
-                        if db_lock.is_participant_valid(i)
-                            && !bit_is_set(&slices[idx].ready_set, i)
+                        if db_lock.is_participant_valid(i) && !bit_is_set(&slices[idx].ready_set, i)
                         {
                             let base = db_lock
                                 .first_answered_round(i)
@@ -712,10 +740,7 @@ pub fn spawn_net_sender(
                     }
                 }
                 for i in to_drop {
-                    crate::util::flprintf(&format!(
-                        "Dropping client #{} because of timeout\n",
-                        i
-                    ));
+                    crate::util::flprintf(&format!("Dropping client #{} because of timeout\n", i));
                     db.lock().unwrap().remove_participant(i);
                 }
                 if db.lock().unwrap().nr_participants() == 0 {
@@ -746,7 +771,11 @@ fn handle_next_message(
         IncomingMsg::Ok { slice_no, cl_no } => {
             let slice = find_slice(slices, slice_no);
             if let Some(idx) = slice {
-                db.lock().unwrap().mark_answered(cl_no as usize, Some(slice_no), slices[idx].rxmit_id);
+                db.lock().unwrap().mark_answered(
+                    cl_no as usize,
+                    Some(slice_no),
+                    slices[idx].rxmit_id,
+                );
                 if !bit_is_set(&slices[idx].ready_set, cl_no as usize) {
                     set_bit(&mut slices[idx].ready_set, cl_no as usize);
                     slices[idx].nr_ready += 1;
@@ -760,10 +789,19 @@ fn handle_next_message(
                 db.lock().unwrap().mark_answered(cl_no as usize, None, 0);
             }
         }
-        IncomingMsg::Retransmit { slice_no, cl_no, map, rxmit } => {
+        IncomingMsg::Retransmit {
+            slice_no,
+            cl_no,
+            map,
+            rxmit,
+        } => {
             let slice = find_slice(slices, slice_no);
             if let Some(idx) = slice {
-                db.lock().unwrap().mark_answered(cl_no as usize, Some(slice_no), slices[idx].rxmit_id);
+                db.lock().unwrap().mark_answered(
+                    cl_no as usize,
+                    Some(slice_no),
+                    slices[idx].rxmit_id,
+                );
                 // C drops a RETR whose echoed rxmit predates the current
                 // round. That optimisation is actively harmful when a
                 // receiver misses consecutive REQACKs (as happens under
@@ -818,7 +856,13 @@ fn find_slice(slices: &[Slice], slice_no: i32) -> Option<usize> {
         .position(|s| s.state != SliceState::Free && s.slice_no == slice_no)
 }
 
-fn append_ring(packet: &mut Vec<u8>, data_buffer: &[u8], data_buf_size: usize, start: usize, size: usize) {
+fn append_ring(
+    packet: &mut Vec<u8>,
+    data_buffer: &[u8],
+    data_buf_size: usize,
+    start: usize,
+    size: usize,
+) {
     let first = std::cmp::min(size, data_buf_size - start);
     packet.extend_from_slice(&data_buffer[start..start + first]);
     if first < size {
@@ -832,7 +876,7 @@ fn send_batch(
     dest: &SocketAddrV4,
     rate_set: &mut crate::rate::RateGovernorSet,
 ) {
-    use nix::sys::socket::{ControlMessage, MultiHeaders, MsgFlags, SockaddrIn, sendmmsg};
+    use nix::sys::socket::{sendmmsg, ControlMessage, MsgFlags, MultiHeaders, SockaddrIn};
     use std::io::IoSlice;
     use std::os::unix::io::AsRawFd;
 
@@ -860,7 +904,14 @@ fn send_batch(
         let cmsgs: [ControlMessage<'_>; 0] = [];
         let mut hdrs = MultiHeaders::<SockaddrIn>::preallocate(chunk, None);
 
-        let n = match sendmmsg(fd, &mut hdrs, iovs.iter(), &addrs, &cmsgs, MsgFlags::empty()) {
+        let n = match sendmmsg(
+            fd,
+            &mut hdrs,
+            iovs.iter(),
+            &addrs,
+            &cmsgs,
+            MsgFlags::empty(),
+        ) {
             Ok(results) => results.into_iter().count(),
             Err(_) => 0,
         };
@@ -882,7 +933,8 @@ fn send_slice(
     sock: &UdpSocket,
     rate_set: &mut crate::rate::RateGovernorSet,
 ) {
-    let nr_blocks = (slice.bytes + net_config.block_size as usize - 1) / net_config.block_size as usize;
+    let nr_blocks =
+        (slice.bytes + net_config.block_size as usize - 1) / net_config.block_size as usize;
     // The ring lock is held only while the packets are being copied out;
     // the network I/O below runs without it, so the local reader can keep
     // filling the (disjoint) free part of the ring in parallel.
@@ -893,7 +945,10 @@ fn send_slice(
             let size = if i * net_config.block_size as usize >= slice.bytes {
                 0
             } else {
-                std::cmp::min(net_config.block_size as usize, slice.bytes - i * net_config.block_size as usize)
+                std::cmp::min(
+                    net_config.block_size as usize,
+                    slice.bytes - i * net_config.block_size as usize,
+                )
             };
             let msg = protocol::DataBlock {
                 slice_no: slice.slice_no,
@@ -929,7 +984,10 @@ fn send_fec_blocks(
         };
         let header = msg.pack();
         let offset = i * net_config.block_size as usize;
-        let end = std::cmp::min(offset + net_config.block_size as usize, slice.fec_data.len());
+        let end = std::cmp::min(
+            offset + net_config.block_size as usize,
+            slice.fec_data.len(),
+        );
         let mut packet = Vec::with_capacity(header.len() + net_config.block_size as usize);
         packet.extend_from_slice(&header);
         packet.extend_from_slice(&slice.fec_data[offset..end]);
@@ -941,7 +999,12 @@ fn send_fec_blocks(
     send_batch(sock, &packets, &net_config.data_mcast_addr, rate_set);
 }
 
-fn fec_encode_slice(slice: &mut Slice, data_buffer: &Mutex<Vec<u8>>, data_buf_size: usize, net_config: &NetConfig) {
+fn fec_encode_slice(
+    slice: &mut Slice,
+    data_buffer: &Mutex<Vec<u8>>,
+    data_buf_size: usize,
+    net_config: &NetConfig,
+) {
     let ring = data_buffer.lock().unwrap();
     let block_size = net_config.block_size as usize;
     let stripes = net_config.fec_stripes as usize;
@@ -1014,7 +1077,8 @@ fn rexmit_slice(
     stats: &mut SenderStats,
     rate_set: &mut crate::rate::RateGovernorSet,
 ) {
-    let nr_blocks = (slice.bytes + net_config.block_size as usize - 1) / net_config.block_size as usize;
+    let nr_blocks =
+        (slice.bytes + net_config.block_size as usize - 1) / net_config.block_size as usize;
     let mut retransmissions = 0u32;
     let mut packets: Vec<Vec<u8>> = Vec::new();
 
@@ -1033,7 +1097,10 @@ fn rexmit_slice(
         let size = if i * net_config.block_size as usize >= slice.bytes {
             0
         } else {
-            std::cmp::min(net_config.block_size as usize, slice.bytes - i * net_config.block_size as usize)
+            std::cmp::min(
+                net_config.block_size as usize,
+                slice.bytes - i * net_config.block_size as usize,
+            )
         };
         let msg = protocol::DataBlock {
             slice_no: slice.slice_no,
@@ -1066,7 +1133,12 @@ fn rexmit_slice(
     slice.need_rxmit = false;
 }
 
-fn ack_slice(slice: &mut Slice, net_config: &mut NetConfig, free_mem_queue: &Produconsum, stats: &mut SenderStats) {
+fn ack_slice(
+    slice: &mut Slice,
+    net_config: &mut NetConfig,
+    free_mem_queue: &Produconsum,
+    stats: &mut SenderStats,
+) {
     if slice.state == SliceState::Acked {
         return;
     }
@@ -1095,14 +1167,21 @@ fn find_free_slice(slices: &[Slice]) -> Option<usize> {
     slices.iter().position(|s| s.state == SliceState::Free)
 }
 
-fn send_reqack(slice: &mut Slice, net_config: &mut NetConfig, free_mem_queue: &Produconsum, stats: &mut SenderStats, sock: &UdpSocket) {
+fn send_reqack(
+    slice: &mut Slice,
+    net_config: &mut NetConfig,
+    free_mem_queue: &Produconsum,
+    stats: &mut SenderStats,
+    sock: &UdpSocket,
+) {
     if net_config.flags & FLAG_ASYNC != 0 && slice.bytes != 0 {
         ack_slice(slice, net_config, free_mem_queue, stats);
         return;
     }
 
     if net_config.flags & FLAG_ASYNC == 0 && slice.rxmit_id != 0 {
-        let nr_blocks = (slice.bytes + net_config.block_size as usize - 1) / net_config.block_size as usize;
+        let nr_blocks =
+            (slice.bytes + net_config.block_size as usize - 1) / net_config.block_size as usize;
         if slice.last_good_block != 0 && slice.last_good_block < nr_blocks {
             net_config.discovery = Discovery::Reducing;
             if slice.last_good_block < net_config.slice_size as usize / 2 {
@@ -1119,7 +1198,11 @@ fn send_reqack(slice: &mut Slice, net_config: &mut NetConfig, free_mem_queue: &P
     if crate::util::dbg_on() {
         crate::util::flprintf(&format!(
             "DBG {:.3} tx REQACK no={} bytes={} nrReady={} rxmit={}\n",
-            crate::util::dbg_stamp(), slice.slice_no, slice.bytes, slice.nr_ready, slice.rxmit_id
+            crate::util::dbg_stamp(),
+            slice.slice_no,
+            slice.bytes,
+            slice.nr_ready,
+            slice.rxmit_id
         ));
     }
     slice.last_good_block = 0;

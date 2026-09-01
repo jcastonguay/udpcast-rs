@@ -39,11 +39,15 @@ enum InInner {
 
 impl InFile {
     pub fn stdin() -> Self {
-        Self { inner: InInner::Stdin }
+        Self {
+            inner: InInner::Stdin,
+        }
     }
 
     pub fn file(f: File) -> Self {
-        Self { inner: InInner::File(f) }
+        Self {
+            inner: InInner::File(f),
+        }
     }
 
     /// The numeric fd, for callers that still speak raw fds (statistics
@@ -88,11 +92,15 @@ enum OutInner {
 
 impl OutFile {
     pub fn stdout() -> Self {
-        Self { inner: OutInner::Stdout }
+        Self {
+            inner: OutInner::Stdout,
+        }
     }
 
     pub fn file(f: File) -> Self {
-        Self { inner: OutInner::File(f) }
+        Self {
+            inner: OutInner::File(f),
+        }
     }
 
     /// The numeric fd, for callers that still speak raw fds.

@@ -78,7 +78,9 @@ impl RateGovernorData for AutoRateData {
             let q = crate::socklib::get_send_queue(sock);
             if q == 0 {
                 self.dir = 0;
-                self.sendbuf = crate::socklib::get_send_buf(sock).map(|v| v as i32).unwrap_or(0);
+                self.sendbuf = crate::socklib::get_send_buf(sock)
+                    .map(|v| v as i32)
+                    .unwrap_or(0);
             } else {
                 self.dir = 1;
                 self.sendbuf = q;
@@ -133,7 +135,9 @@ pub struct RateGovernorSet {
 
 impl RateGovernorSet {
     pub fn new() -> Self {
-        Self { governors: Vec::new() }
+        Self {
+            governors: Vec::new(),
+        }
     }
 
     pub fn add_max_bitrate(&mut self, bitrate_str: &str) {

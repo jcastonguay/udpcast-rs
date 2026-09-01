@@ -17,17 +17,17 @@ MODE=${1:-full}
 # name | receivers | size | loss% | rdv ("" = broadcast control) | extra sender args
 #       | stagger seconds between receiver launches
 case "$MODE" in
-    quick)
-        SCENARIOS="
+quick)
+	SCENARIOS="
 base-1rx|1|262144|0|239.1.1.1||
 base-3rx|3|1048576|0|239.1.1.1||
 broadcast-ctrl|3|262144|0|||
 nopointopoint|1|262144|0|239.1.1.1|-2|
 staggered|3|1048576|0|239.1.1.1|-w 2|1.5
 "
-        ;;
-    *)
-        SCENARIOS="
+	;;
+*)
+	SCENARIOS="
 base-1rx|1|262144|0|239.1.1.1||
 base-3rx|3|1048576|0|239.1.1.1||
 base-5rx|5|4194304|0|239.1.1.1||
@@ -41,28 +41,28 @@ fec-3rx|3|2097152|5|239.1.1.1|-F 8x2/128|
 slow-receivers|3|4194304|0|239.1.1.1|-r 20M|
 big-32mb|3|33554432|0|239.1.1.1||
 "
-        ;;
+	;;
 esac
 
 declare -a NAMES RESULTS
 FAIL=0
 while IFS='|' read -r name nrx size loss rdv extra stagger; do
-    [ -z "${name// /}" ] && continue
-    echo "################ scenario: $name (rx=$nrx size=$size loss=$loss rdv='${rdv:-broadcast}' args='$extra')"
-    start=$(date +%s)
-    out=$(NRX="$nrx" LOSS="$loss" RDV="$rdv" STAGGER="${stagger:-${STAGGER:-0.3}}" \
-          W="/tmp/udpc_matrix_$name" timeout 600 bash test_lan.sh "$nrx" "$size" $extra 2>&1)
-    rc=$?
-    el=$(( $(date +%s) - start ))
-    summary=$(echo "$out" | grep -E "^(LAN TEST|receiver #[0-9]+: (\*\*\*|NO ))" | head -8)
-    if [ $rc -eq 0 ]; then
-        RESULTS+=("PASS  $name (${el}s)")
-    else
-        RESULTS+=("FAIL  $name (${el}s)")
-        echo "$summary"
-        FAIL=$((FAIL + 1))
-    fi
-done <<< "$SCENARIOS"
+	[ -z "${name// /}" ] && continue
+	echo "################ scenario: $name (rx=$nrx size=$size loss=$loss rdv='${rdv:-broadcast}' args='$extra')"
+	start=$(date +%s)
+	out=$(NRX="$nrx" LOSS="$loss" RDV="$rdv" STAGGER="${stagger:-${STAGGER:-0.3}}" \
+		W="/tmp/udpc_matrix_$name" timeout 600 bash test_lan.sh "$nrx" "$size" $extra 2>&1)
+	rc=$?
+	el=$(($(date +%s) - start))
+	summary=$(echo "$out" | grep -E "^(LAN TEST|receiver #[0-9]+: (\*\*\*|NO ))" | head -8)
+	if [ $rc -eq 0 ]; then
+		RESULTS+=("PASS  $name (${el}s)")
+	else
+		RESULTS+=("FAIL  $name (${el}s)")
+		echo "$summary"
+		FAIL=$((FAIL + 1))
+	fi
+done <<<"$SCENARIOS"
 
 echo
 echo "=================== MATRIX ($MODE) ==================="

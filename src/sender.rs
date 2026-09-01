@@ -105,7 +105,12 @@ struct Cli {
     #[arg(short = 's', long = "sendbuf")]
     sendbuf: Option<String>,
 
-    #[arg(short = 'C', long = "min-receivers", alias = "min-clients", default_value = "0")]
+    #[arg(
+        short = 'C',
+        long = "min-receivers",
+        alias = "min-clients",
+        default_value = "0"
+    )]
     min_receivers: i32,
 
     #[arg(short = 'W', long = "max-wait", default_value = "0")]
@@ -131,7 +136,11 @@ struct Cli {
     #[arg(short = 'I', long = "bw-period", default_value = "0")]
     bw_period: i64,
 
-    #[arg(short = 'x', long = "print-uncompressed-position", default_value = "-1")]
+    #[arg(
+        short = 'x',
+        long = "print-uncompressed-position",
+        default_value = "-1"
+    )]
     print_uncompressed_pos: i32,
 
     #[arg(
@@ -170,27 +179,27 @@ struct Cli {
 pub(crate) fn parse_fec_spec(spec: &str) -> (u32, u32, u32) {
     let (stripes, rest) = match spec.find('x') {
         Some(pos) => {
-            let s: u32 = spec[..pos].parse().unwrap_or_else(|_| {
-                crate::util::fatal(1, &format!("bad fec spec {}\n", spec))
-            });
+            let s: u32 = spec[..pos]
+                .parse()
+                .unwrap_or_else(|_| crate::util::fatal(1, &format!("bad fec spec {}\n", spec)));
             (s, &spec[pos + 1..])
         }
         None => (8, spec),
     };
     let (redundancy, stripesize) = match rest.find('/') {
         Some(pos) => {
-            let r: u32 = rest[..pos].parse().unwrap_or_else(|_| {
-                crate::util::fatal(1, &format!("bad fec spec {}\n", spec))
-            });
-            let ss: u32 = rest[pos + 1..].parse().unwrap_or_else(|_| {
-                crate::util::fatal(1, &format!("bad fec spec {}\n", spec))
-            });
+            let r: u32 = rest[..pos]
+                .parse()
+                .unwrap_or_else(|_| crate::util::fatal(1, &format!("bad fec spec {}\n", spec)));
+            let ss: u32 = rest[pos + 1..]
+                .parse()
+                .unwrap_or_else(|_| crate::util::fatal(1, &format!("bad fec spec {}\n", spec)));
             (r, ss)
         }
         None => {
-            let r: u32 = rest.parse().unwrap_or_else(|_| {
-                crate::util::fatal(1, &format!("bad fec spec {}\n", spec))
-            });
+            let r: u32 = rest
+                .parse()
+                .unwrap_or_else(|_| crate::util::fatal(1, &format!("bad fec spec {}\n", spec)));
             (r, 128)
         }
     };
@@ -276,7 +285,6 @@ pub fn run_sender() {
     if rexmit_hello_interval == 0 {
         rexmit_hello_interval = negotiate::DEFAULT_HELLO_INTERVAL_MS;
     }
-
 
     let requested_buf_size = cli
         .sendbuf

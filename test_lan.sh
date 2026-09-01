@@ -39,8 +39,14 @@ MINWAIT=${MINWAIT:-0}
 W=${W:-/tmp/udpc_lan}
 
 # Positional: [num_receivers] [size] [extra sender args...]
-if [ $# -ge 1 ]; then NRX=$1; shift; fi
-if [ $# -ge 1 ]; then SIZE=$1; shift; fi
+if [ $# -ge 1 ]; then
+	NRX=$1
+	shift
+fi
+if [ $# -ge 1 ]; then
+	SIZE=$1
+	shift
+fi
 SEND_ARGS="${SEND_ARGS:-$*}"
 
 # Wait for every receiver to register before starting: that is the documented
@@ -49,30 +55,31 @@ SEND_ARGS="${SEND_ARGS:-$*}"
 # prepended rather than appended.
 AUTO_ARGS=""
 case "$SEND_ARGS" in
-    *-C*|*--min-receivers*) ;;
-    *) AUTO_ARGS="-C $NRX" ;;
+*-C* | *--min-receivers*) ;;
+*) AUTO_ARGS="-C $NRX" ;;
 esac
 case "$SEND_ARGS" in
-    *-w*|*--min-wait*) ;;
-    *) [ "${MINWAIT:-0}" != 0 ] && AUTO_ARGS="$AUTO_ARGS -w $MINWAIT" ;;
+*-w* | *--min-wait*) ;;
+*) [ "${MINWAIT:-0}" != 0 ] && AUTO_ARGS="$AUTO_ARGS -w $MINWAIT" ;;
 esac
 case "$SEND_ARGS" in
-    *-R*|*--retries*) ;;
-    # A silent participant is dropped only after --retries-until-drop REQACK
-    # rounds, and those rounds take >= 1s each from the tenth retry onwards
-    # (same ramp as C). Only the dropout scenario needs that to happen well
-    # before the receivers' own --receive-timeout, so shorten the budget there
-    # and keep the C default (200) everywhere else.
-    *) [ -n "${KILL_EARLY:-}" ] && AUTO_ARGS="$AUTO_ARGS -R ${RETRIES:-20}" ;;
+*-R* | *--retries*) ;;
+# A silent participant is dropped only after --retries-until-drop REQACK
+# rounds, and those rounds take >= 1s each from the tenth retry onwards
+# (same ramp as C). Only the dropout scenario needs that to happen well
+# before the receivers' own --receive-timeout, so shorten the budget there
+# and keep the C default (200) everywhere else.
+*) [ -n "${KILL_EARLY:-}" ] && AUTO_ARGS="$AUTO_ARGS -R ${RETRIES:-20}" ;;
 esac
 SEND_ARGS="$AUTO_ARGS $SEND_ARGS"
 
 # Surviving receivers must outlive the drop detection.
-RCV_TIMEOUT="${RCV_TIMEOUT:-$( [ -n "${KILL_EARLY:-}" ] && echo 180 || echo 60 )}"
+RCV_TIMEOUT="${RCV_TIMEOUT:-$([ -n "${KILL_EARLY:-}" ] && echo 180 || echo 60)}"
 
-rm -rf "$W"; mkdir -p "$W"
+rm -rf "$W"
+mkdir -p "$W"
 
-cat > "$W/child.sh" <<'CHILD'
+cat >"$W/child.sh" <<'CHILD'
 #!/bin/bash
 # $1 = host octet (2..), $W shared dir, plus udpcast args in $2..
 i=$1; shift
@@ -120,7 +127,7 @@ sleep 0.5
 CHILD
 chmod +x "$W/child.sh"
 
-cat > "$W/parent.sh" <<'PARENT'
+cat >"$W/parent.sh" <<'PARENT'
 #!/bin/bash
 set -u
 W=$1; shift
@@ -195,7 +202,7 @@ PARENT
 
 export LOSS STAGGER KILL_EARLY TC_HOOK
 timeout 600 unshare --net --user --map-root-user --keep-caps \
-    bash "$W/parent.sh" "$W" "$NRX" "$SIZE" "$BIN" "$PORT" "$RDV" "$DATA" "$SEND_ARGS"
+	bash "$W/parent.sh" "$W" "$NRX" "$SIZE" "$BIN" "$PORT" "$RDV" "$DATA" "$SEND_ARGS"
 
 echo "=================== RESULTS ==================="
 echo "--- sender ---"
@@ -208,33 +215,34 @@ FAIL=0
 DROPPED_SEEN=0
 grep -q "Dropping client" "$W/tx.log" 2>/dev/null && DROPPED_SEEN=1
 for i in $(seq 2 $((NRX + 1))); do
-    n=$((i - 1))
-    if [ -n "${KILL_EARLY:-}" ] && [ "$n" = "$KILL_EARLY" ]; then
-        echo "receiver #$n: killed on purpose ($(stat -c%s "$W/dst$i" 2>/dev/null || echo 0) bytes before death)"
-        continue
-    fi
-    if [ ! -f "$W/dst$i" ]; then
-        echo "receiver #$n: NO OUTPUT FILE"
-        tail -4 "$W/rx$i.log" 2>/dev/null
-        FAIL=$((FAIL + 1)); continue
-    fi
-    got=$(sha256sum "$W/dst$i" | awk '{print $1}')
-    if [ "$got" = "$SRCSHA" ]; then
-        echo "receiver #$n: OK ($(stat -c%s "$W/dst$i") bytes)"
-    else
-        echo "receiver #$n: *** CORRUPTION *** want=${SRCSHA:0:16}.. got=${got:0:16}.."
-        echo "   size want=$SIZE got=$(stat -c%s "$W/dst$i")"
-        tail -4 "$W/rx$i.log" 2>/dev/null
-        FAIL=$((FAIL + 1))
-    fi
+	n=$((i - 1))
+	if [ -n "${KILL_EARLY:-}" ] && [ "$n" = "$KILL_EARLY" ]; then
+		echo "receiver #$n: killed on purpose ($(stat -c%s "$W/dst$i" 2>/dev/null || echo 0) bytes before death)"
+		continue
+	fi
+	if [ ! -f "$W/dst$i" ]; then
+		echo "receiver #$n: NO OUTPUT FILE"
+		tail -4 "$W/rx$i.log" 2>/dev/null
+		FAIL=$((FAIL + 1))
+		continue
+	fi
+	got=$(sha256sum "$W/dst$i" | awk '{print $1}')
+	if [ "$got" = "$SRCSHA" ]; then
+		echo "receiver #$n: OK ($(stat -c%s "$W/dst$i") bytes)"
+	else
+		echo "receiver #$n: *** CORRUPTION *** want=${SRCSHA:0:16}.. got=${got:0:16}.."
+		echo "   size want=$SIZE got=$(stat -c%s "$W/dst$i")"
+		tail -4 "$W/rx$i.log" 2>/dev/null
+		FAIL=$((FAIL + 1))
+	fi
 done
 if [ -n "${KILL_EARLY:-}" ]; then
-    if [ "$DROPPED_SEEN" = 1 ]; then
-        echo "sender dropped the dead participant as expected"
-    else
-        echo "*** sender never reported dropping the killed receiver ***"
-        FAIL=$((FAIL + 1))
-    fi
+	if [ "$DROPPED_SEEN" = 1 ]; then
+		echo "sender dropped the dead participant as expected"
+	else
+		echo "*** sender never reported dropping the killed receiver ***"
+		FAIL=$((FAIL + 1))
+	fi
 fi
 echo "==============================================="
 [ $FAIL -eq 0 ] && echo "LAN TEST PASSED ($NRX receivers)" || echo "LAN TEST FAILED ($FAIL/$NRX)"

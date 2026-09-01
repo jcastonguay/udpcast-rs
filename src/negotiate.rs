@@ -75,18 +75,14 @@ pub fn open_sender_socks(
     // broadcast address", anything else falls back to a rendezvous group.
     net_config.control_mcast_addr = socklib::clear_ip();
     if net_config.ttl == 1 && net_config.mcast_rdv.is_none() {
-        net_config.control_mcast_addr =
-            socklib::get_broadcast_address(&net_if, receiver_port);
+        net_config.control_mcast_addr = socklib::get_broadcast_address(&net_if, receiver_port);
     }
     let _ = socklib::set_socket_to_broadcast(&main);
     if net_config.control_mcast_addr.ip().is_unspecified() {
-        net_config.control_mcast_addr = socklib::get_mcast_all_address(
-            net_config.mcast_rdv.as_deref(),
-            receiver_port,
-        );
+        net_config.control_mcast_addr =
+            socklib::get_mcast_all_address(net_config.mcast_rdv.as_deref(), receiver_port);
         if socklib::is_mcast_address(&net_config.control_mcast_addr) {
-            let _ =
-                socklib::set_mcast_destination(&main, &net_if, &net_config.control_mcast_addr);
+            let _ = socklib::set_mcast_destination(&main, &net_if, &net_config.control_mcast_addr);
             let _ = socklib::set_ttl(&main, net_config.ttl);
         }
     }
@@ -135,21 +131,21 @@ pub fn open_sender_socks(
     socklib::set_port(&mut net_config.data_mcast_addr, receiver_port);
 
     if announce {
-    util::flprintf(&format!(
-        "{}UDP sender for {} at {} on {}\n",
-        if disk_config.pipe_name.is_some() {
-            "Compressed "
-        } else {
-            ""
-        },
-        disk_config.file_name.as_deref().unwrap_or("(stdin)"),
-        net_if.addr,
-        net_if.name
-    ));
-    util::flprintf(&format!(
-        "Broadcasting control to {}\n",
-        net_config.control_mcast_addr.ip()
-    ));
+        util::flprintf(&format!(
+            "{}UDP sender for {} at {} on {}\n",
+            if disk_config.pipe_name.is_some() {
+                "Compressed "
+            } else {
+                ""
+            },
+            disk_config.file_name.as_deref().unwrap_or("(stdin)"),
+            net_if.addr,
+            net_if.name
+        ));
+        util::flprintf(&format!(
+            "Broadcasting control to {}\n",
+            net_config.control_mcast_addr.ip()
+        ));
     }
 
     Some(SenderSocks { main, extra })
@@ -387,14 +383,7 @@ fn handle_receiver_msg(
             }
             let req = protocol::ConnectReq::unpack(buf);
             let capabilities = protocol::CAP_BIG_ENDIAN | req.capabilities;
-            send_connection_reply(
-                db,
-                sock,
-                net_config,
-                from,
-                capabilities,
-                req.rcvbuf,
-            );
+            send_connection_reply(db, sock, net_config, from, capabilities, req.rcvbuf);
             false
         }
         protocol::CMD_GO => true,
@@ -470,7 +459,9 @@ pub fn start_sender_with_socks(
     send_hello(net_config, &socks.main, false);
 
     let hello_interval = if net_config.rexmit_hello_interval > 0 {
-        Some(Duration::from_millis(net_config.rexmit_hello_interval as u64))
+        Some(Duration::from_millis(
+            net_config.rexmit_hello_interval as u64,
+        ))
     } else if net_config.rexmit_hello_interval < 0 {
         None
     } else {
@@ -528,9 +519,7 @@ pub fn start_sender_with_socks(
         return 0;
     }
 
-    if db.lock().unwrap().nr_participants() == 0
-        && net_config.flags & senddata::FLAG_ASYNC == 0
-    {
+    if db.lock().unwrap().nr_participants() == 0 && net_config.flags & senddata::FLAG_ASYNC == 0 {
         util::flprintf("No participants... exiting\n");
         return 0;
     }
@@ -561,7 +550,10 @@ fn do_transfer(
         if nr != 1 {
             util::fatal(
                 1,
-                &format!("pointopoint mode set, and {} participants instead of 1\n", nr),
+                &format!(
+                    "pointopoint mode set, and {} participants instead of 1\n",
+                    nr
+                ),
             );
         }
     }
@@ -576,8 +568,7 @@ fn do_transfer(
             if is_p2p {
                 if let Some(ip) = db_lock.get_participant_ip(i) {
                     let port = net_config.data_mcast_addr.port();
-                    net_config.data_mcast_addr =
-                        std::net::SocketAddrV4::new(*ip.ip(), port);
+                    net_config.data_mcast_addr = std::net::SocketAddrV4::new(*ip.ip(), port);
                 }
             }
             net_config.capabilities &= db_lock.get_participant_capabilities(i);

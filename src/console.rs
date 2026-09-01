@@ -72,20 +72,16 @@ impl Console {
 
         // Keep C's behaviour: if the terminal mode cannot be read the
         // console still works, it just is not put into raw mode.
-        let old_tio = termios::tcgetattr(fd.as_fd())
-            .ok()
-            .map(|mut old| {
-                old.local_flags
-                    .remove(termios::LocalFlags::ECHO | termios::LocalFlags::ICANON);
-                old.control_chars[termios::SpecialCharacterIndices::VMIN as usize] = 1;
-                old.control_chars[termios::SpecialCharacterIndices::VTIME as usize] = 0;
-                if let Err(e) =
-                    termios::tcsetattr(fd.as_fd(), termios::SetArg::TCSAFLUSH, &old)
-                {
-                    eprintln!("Set terminal to raw: {}", e);
-                }
-                old
-            });
+        let old_tio = termios::tcgetattr(fd.as_fd()).ok().map(|mut old| {
+            old.local_flags
+                .remove(termios::LocalFlags::ECHO | termios::LocalFlags::ICANON);
+            old.control_chars[termios::SpecialCharacterIndices::VMIN as usize] = 1;
+            old.control_chars[termios::SpecialCharacterIndices::VTIME as usize] = 0;
+            if let Err(e) = termios::tcsetattr(fd.as_fd(), termios::SetArg::TCSAFLUSH, &old) {
+                eprintln!("Set terminal to raw: {}", e);
+            }
+            old
+        });
 
         Some(Console { fd, old_tio })
     }
@@ -110,9 +106,7 @@ impl Console {
             *max_fd = console_fd + 1;
         }
 
-        let mut tv = timeout.map(|d| {
-            TimeVal::new(d.as_secs() as i64, d.subsec_micros() as i64)
-        });
+        let mut tv = timeout.map(|d| TimeVal::new(d.as_secs() as i64, d.subsec_micros() as i64));
         let ret = select::select(*max_fd, Some(&mut fds), None, None, tv.as_mut())?;
         let key_pressed = fds.contains(self.fd.as_fd());
         Ok((ret, key_pressed))

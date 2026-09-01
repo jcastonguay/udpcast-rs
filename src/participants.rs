@@ -50,11 +50,7 @@ impl ParticipantsDb {
     pub fn remove_participant(&mut self, i: usize) -> i32 {
         if let Some(client) = self.client_table.get_mut(i) {
             if client.used {
-                eprintln!(
-                    "Disconnecting #{} ({})",
-                    i,
-                    client.addr
-                );
+                eprintln!("Disconnecting #{} ({})", i, client.addr);
                 client.used = false;
                 self.nr_participants -= 1;
             }
@@ -119,10 +115,7 @@ impl ParticipantsDb {
                 client.ever_answered = true;
             }
             if let Some(sn) = slice_no {
-                if client
-                    .first_answered_round
-                    .map_or(true, |(s, _)| s != sn)
-                {
+                if client.first_answered_round.map_or(true, |(s, _)| s != sn) {
                     if crate::util::dbg_on() {
                         crate::util::flprintf(&format!(
                             "DBG {:.3} sender: cl={} first answer for slice {} at round {}\n",
@@ -143,7 +136,10 @@ impl ParticipantsDb {
     }
 
     pub fn first_answered_round(&self, i: usize) -> Option<(i32, i32)> {
-        self.client_table.get(i).map(|c| c.first_answered_round).flatten()
+        self.client_table
+            .get(i)
+            .map(|c| c.first_answered_round)
+            .flatten()
     }
 
     pub fn get_participant_rcvbuf(&self, i: usize) -> u32 {
