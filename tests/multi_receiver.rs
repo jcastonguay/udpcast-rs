@@ -60,11 +60,17 @@ fn two_receivers_gate_acks_and_retransmits() {
     let sender_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").unwrap());
     let sender_addr = sender_sock.local_addr().unwrap();
     let observer = UdpSocket::bind(dest).unwrap();
-    observer.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+    observer
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
     let part_a = UdpSocket::bind(addr_a).unwrap();
     let part_b = UdpSocket::bind(addr_b).unwrap();
-    part_a.set_read_timeout(Some(Duration::from_millis(10))).unwrap();
-    part_b.set_read_timeout(Some(Duration::from_millis(10))).unwrap();
+    part_a
+        .set_read_timeout(Some(Duration::from_millis(10)))
+        .unwrap();
+    part_b
+        .set_read_timeout(Some(Duration::from_millis(10)))
+        .unwrap();
 
     let caps = protocol::CAP_BIG_ENDIAN | protocol::CAP_NEW_GEN;
     let db = Arc::new(Mutex::new(ParticipantsDb::new()));
@@ -152,12 +158,17 @@ fn two_receivers_gate_acks_and_retransmits() {
     // recording everything sent meanwhile.
     let deadline = Instant::now() + Duration::from_secs(10);
     while initial_reqacks.len() < 3 {
-        assert!(Instant::now() < deadline, "timed out waiting for initial REQACKs");
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for initial REQACKs"
+        );
         if let Ok((n, _)) = observer.recv_from(&mut buf) {
             let op = u16::from_be_bytes([buf[0], buf[1]]);
             if op == protocol::CMD_DATA && n >= 16 {
                 let d = protocol::DataBlock::unpack(&buf);
-                let e = data_seen.entry((d.slice_no, d.block_no)).or_insert((0, buf[16..n].to_vec()));
+                let e = data_seen
+                    .entry((d.slice_no, d.block_no))
+                    .or_insert((0, buf[16..n].to_vec()));
                 e.0 += 1;
             } else if op == protocol::CMD_REQACK && n >= protocol::REQACK_SIZE {
                 let r = recv_reqack(&buf);
@@ -185,13 +196,18 @@ fn two_receivers_gate_acks_and_retransmits() {
             let op = u16::from_be_bytes([buf[0], buf[1]]);
             if op == protocol::CMD_DATA && n >= 16 {
                 let d = protocol::DataBlock::unpack(&buf);
-                let e = data_seen.entry((d.slice_no, d.block_no)).or_insert((0, buf[16..n].to_vec()));
+                let e = data_seen
+                    .entry((d.slice_no, d.block_no))
+                    .or_insert((0, buf[16..n].to_vec()));
                 e.0 += 1;
             } else if op == protocol::CMD_REQACK && n >= protocol::REQACK_SIZE {
                 let r = recv_reqack(&buf);
                 reqack_seen.insert(r.slice_no, r.bytes);
                 reqack_log.push((r.slice_no, r.bytes, r.rxmit));
-                assert!(r.slice_no < 3, "pipeline advanced without acks from receiver B");
+                assert!(
+                    r.slice_no < 3,
+                    "pipeline advanced without acks from receiver B"
+                );
                 send_ok(&part_a, r.slice_no);
                 if r.slice_no == 1 {
                     send_rexmit(r.rxmit);
@@ -219,12 +235,17 @@ fn two_receivers_gate_acks_and_retransmits() {
         if sender_thread.is_finished() {
             break;
         }
-        assert!(Instant::now() < deadline, "sender did not finish after all acks");
+        assert!(
+            Instant::now() < deadline,
+            "sender did not finish after all acks"
+        );
         if let Ok((n, _)) = observer.recv_from(&mut buf) {
             let op = u16::from_be_bytes([buf[0], buf[1]]);
             if op == protocol::CMD_DATA && n >= 16 {
                 let d = protocol::DataBlock::unpack(&buf);
-                let e = data_seen.entry((d.slice_no, d.block_no)).or_insert((0, buf[16..n].to_vec()));
+                let e = data_seen
+                    .entry((d.slice_no, d.block_no))
+                    .or_insert((0, buf[16..n].to_vec()));
                 e.0 += 1;
             } else if op == protocol::CMD_REQACK && n >= protocol::REQACK_SIZE {
                 let r = recv_reqack(&buf);
@@ -239,9 +260,15 @@ fn two_receivers_gate_acks_and_retransmits() {
 
     // REQACKs for all data slices plus the final 0-byte slice.
     for s in 0..=NR_DATA_SLICES {
-        let bytes = reqack_seen.get(&s).unwrap_or_else(|| panic!("no REQACK for slice {}", s));
+        let bytes = reqack_seen
+            .get(&s)
+            .unwrap_or_else(|| panic!("no REQACK for slice {}", s));
         let expect = if s == NR_DATA_SLICES { 0 } else { SLICE_BYTES };
-        assert_eq!(*bytes, expect, "REQACK bytes mismatch for slice {} (log {:?})", s, reqack_log);
+        assert_eq!(
+            *bytes, expect,
+            "REQACK bytes mismatch for slice {} (log {:?})",
+            s, reqack_log
+        );
     }
 
     // Every data block arrived with intact payload; block 2 of slice 1 twice.
@@ -252,9 +279,17 @@ fn two_receivers_gate_acks_and_retransmits() {
                 .unwrap_or_else(|| panic!("missing DATA slice {} block {}", s, b));
             let offset = (s as usize) * SLICE_BYTES as usize + (b as usize) * BLOCK;
             let expected: Vec<u8> = (offset..offset + BLOCK).map(source_byte).collect();
-            assert_eq!(*payload, expected, "payload mismatch slice {} block {}", s, b);
+            assert_eq!(
+                *payload, expected,
+                "payload mismatch slice {} block {}",
+                s, b
+            );
             if (s, b) == (1, 2) {
-                assert!(*count >= 2, "retransmitted block sent only {} time(s)", count);
+                assert!(
+                    *count >= 2,
+                    "retransmitted block sent only {} time(s)",
+                    count
+                );
             } else {
                 assert_eq!(*count, 1, "slice {} block {} sent {} times", s, b, count);
             }
@@ -301,11 +336,13 @@ fn fec_sender_advertises_cap_fec_on_the_wire() {
 
     let self_addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), port_base);
     let observer = UdpSocket::bind(self_addr).unwrap();
-    observer.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
-    // The one "receiver": a real socket, registered via CONNECT_REQ.
-    let part = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 2), port_base))
+    observer
+        .set_read_timeout(Some(Duration::from_millis(100)))
         .unwrap();
-    part.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+    // The one "receiver": a real socket, registered via CONNECT_REQ.
+    let part = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 2), port_base)).unwrap();
+    part.set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
 
     let flags = FLAG_SN | senddata::FLAG_FEC | senddata::FLAG_NOKBD;
     let cfg: &'static mut NetConfig = Box::leak(Box::new(NetConfig {
@@ -359,10 +396,15 @@ fn fec_sender_advertises_cap_fec_on_the_wire() {
     let main = UdpSocket::bind("127.0.0.1:0").unwrap();
     let sender_addr = main.local_addr().unwrap();
     let handle = std::thread::spawn(move || {
-        start_sender_with_socks(disk, cfg, stat, SenderSocks {
-            main,
-            extra: vec![],
-        })
+        start_sender_with_socks(
+            disk,
+            cfg,
+            stat,
+            SenderSocks {
+                main,
+                extra: vec![],
+            },
+        )
     });
 
     // The receiver connects; the CONNECT_REPLY is the first thing that
@@ -423,14 +465,13 @@ fn fec_sender_advertises_cap_fec_on_the_wire() {
                     }
                     protocol::CMD_FEC if n >= protocol::FEC_BLOCK_SIZE + block_size as usize => {
                         let f = protocol::FecBlock::unpack(&buf);
-                        fec.entry(f.slice_no)
-                            .or_default()
-                            .push((
-                                f.block_no,
-                                f.stripes,
-                                buf[protocol::FEC_BLOCK_SIZE..protocol::FEC_BLOCK_SIZE + block_size as usize]
-                                    .to_vec(),
-                            ));
+                        fec.entry(f.slice_no).or_default().push((
+                            f.block_no,
+                            f.stripes,
+                            buf[protocol::FEC_BLOCK_SIZE
+                                ..protocol::FEC_BLOCK_SIZE + block_size as usize]
+                                .to_vec(),
+                        ));
                     }
                     protocol::CMD_REQACK if n >= protocol::REQACK_SIZE => {
                         let r = protocol::Reqack::unpack(&buf);
@@ -454,7 +495,11 @@ fn fec_sender_advertises_cap_fec_on_the_wire() {
     // Every HELLO carried the same advertised word as the reply.
     assert!(!hello_caps.is_empty(), "no HELLO observed");
     for c in &hello_caps {
-        assert_eq!(*c, expected_caps, "HELLO capabilities must be {:08x}", expected_caps);
+        assert_eq!(
+            *c, expected_caps,
+            "HELLO capabilities must be {:08x}",
+            expected_caps
+        );
     }
 
     // Every slice: all data blocks intact, exactly stripes*redundancy FEC
@@ -470,7 +515,13 @@ fn fec_sender_advertises_cap_fec_on_the_wire() {
         d.sort_by_key(|(b, _)| *b);
         for (i, (b, blk)) in d.iter().enumerate() {
             assert_eq!(*b, i as u16, "slice {} block order", s);
-            assert_eq!(blk.len(), block_size as usize, "slice {} block {} size", s, i);
+            assert_eq!(
+                blk.len(),
+                block_size as usize,
+                "slice {} block {} size",
+                s,
+                i
+            );
             let off = s * slice_blocks * block_size as usize + i * block_size as usize;
             assert_eq!(
                 &blk[..],
@@ -483,21 +534,14 @@ fn fec_sender_advertises_cap_fec_on_the_wire() {
         let f = fec
             .get(&(s as i32))
             .unwrap_or_else(|| panic!("no FEC for slice {}", s));
-        assert_eq!(
-            f.len(),
-            stripes * redundancy,
-            "slice {} fec count",
-            s
-        );
+        assert_eq!(f.len(), stripes * redundancy, "slice {} fec count", s);
         for (_bno, stripes_f, _) in f {
             assert_eq!(*stripes_f, stripes as i32, "slice {} fec stripes field", s);
         }
         for stripe in 0..stripes {
             let per_stripe = slice_blocks / stripes;
-            let positions: Vec<usize> =
-                (0..per_stripe).map(|j| stripe + j * stripes).collect();
-            let data_ptrs: Vec<&[u8]> =
-                positions.iter().map(|&p| d[p].1.as_slice()).collect();
+            let positions: Vec<usize> = (0..per_stripe).map(|j| stripe + j * stripes).collect();
+            let data_ptrs: Vec<&[u8]> = positions.iter().map(|&p| d[p].1.as_slice()).collect();
             let mut par: Vec<Vec<u8>> = vec![vec![0u8; block_size as usize]; redundancy];
             let mut par_ptrs: Vec<&mut [u8]> = par.iter_mut().map(|b| b.as_mut_slice()).collect();
             udpcast::fec::fec_encode(block_size as usize, &data_ptrs, &mut par_ptrs);
@@ -509,7 +553,13 @@ fn fec_sender_advertises_cap_fec_on_the_wire() {
                     .unwrap_or_else(|| panic!("no FEC block {} of slice {}", bno, s))
                     .2
                     .clone();
-                assert_eq!(&got[..], &expect[..], "parity mismatch slice {} bno {}", s, bno);
+                assert_eq!(
+                    &got[..],
+                    &expect[..],
+                    "parity mismatch slice {} bno {}",
+                    s,
+                    bno
+                );
             }
         }
     }
