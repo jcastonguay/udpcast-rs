@@ -41,6 +41,13 @@ pub fn is_hello(opcode: u16) -> bool {
 // ---------------------------------------------------------------------------
 
 pub const CAP_NEW_GEN: u32 = 0x0001;
+/// Forward error correction. C 2012 defines this bit (`udpc-protoc.h`,
+/// under BB_FEATURE_UDPCAST_FEC) but never raises it: the C receiver turns
+/// FEC on by the arrival of CMD_FEC packets and only tests CAP_NEW_GEN /
+/// CAP_ASYNC from the advertised word. This port sets the bit in the
+/// sender's HELLO / CONNECT_REPLY while `-F` is in use (`senddata::
+/// sender_capabilities`); the bit is therefore informational for old
+/// peers, which ignore it, so advertising it is safe for C receivers.
 pub const CAP_FEC: u32 = 0x0004;
 pub const CAP_BIG_ENDIAN: u32 = 0x0008;
 pub const CAP_LITTLE_ENDIAN: u32 = 0x0010;

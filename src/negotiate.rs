@@ -447,10 +447,11 @@ pub fn start_sender_with_socks(
         socklib::set_send_buf(&socks.main, net_config.requested_buf_size);
     }
 
-    net_config.capabilities = protocol::SENDER_CAPABILITIES;
-    if net_config.flags & senddata::FLAG_ASYNC != 0 {
-        net_config.capabilities |= protocol::CAP_ASYNC;
-    }
+    // C assembles this in the sender start (`udps-negotiate.c:390`). HELLO
+    // and every CONNECT_REPLY carry this pre-AND word; the per-participant
+    // AND further down only feeds the endianness check and the debug print,
+    // exactly like C's doTransfer.
+    net_config.capabilities = senddata::sender_capabilities(net_config.flags);
 
     // A console is prepared unless -k/--nokbd, and it is stdin when the data
     // comes from a file (-f) /dev/tty otherwise (-p pipe or stdin data).

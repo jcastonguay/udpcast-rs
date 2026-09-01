@@ -110,6 +110,29 @@ pub const FLAG_STREAMING: u32 = 0x0100;
 pub const FLAG_PASSIVE: u32 = 0x0010;
 pub const FLAG_IGNORE_LOST_DATA: u32 = 0x0400;
 
+/// The sender's capabilities word, as it is advertised in HELLO and in the
+/// CONNECT_REPLY.
+///
+/// Base is `SENDER_CAPABILITIES` (CAP_NEW_GEN | CAP_BIG_ENDIAN) plus
+/// CAP_ASYNC, exactly as C `udps-negotiate.c:390-392` assembles it. The
+/// 2012 reference defines `CAP_FEC` (`udpc-protoc.h`, under
+/// BB_FEATURE_UDPCAST_FEC) but never raises it, so C peers never rely on
+/// it: the C receiver turns FEC on by the arrival of CMD_FEC packets and
+/// only tests CAP_NEW_GEN / CAP_ASYNC from the advertised word. This port
+/// additionally sets CAP_FEC while `-F` is in use, so the word tells the
+/// truth; the bit is harmless to old peers for the same reason CAP_LATE_JOIN
+/// is.
+pub fn sender_capabilities(flags: u32) -> u32 {
+    let mut caps = protocol::SENDER_CAPABILITIES;
+    if flags & FLAG_FEC != 0 {
+        caps |= protocol::CAP_FEC;
+    }
+    if flags & FLAG_ASYNC != 0 {
+        caps |= protocol::CAP_ASYNC;
+    }
+    caps
+}
+
 pub const DEFAULT_STAT_PERIOD: i64 = 500_000;
 
 pub fn send_hello(net_config: &NetConfig, sock: &UdpSocket, streaming: bool) {
@@ -1133,4 +1156,41 @@ fn send_reqack(slice: &mut Slice, net_config: &mut NetConfig, free_mem_queue: &P
     };
     let packed = msg.pack();
     let _ = sock.send_to(&packed, &net_config.data_mcast_addr);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{self, CAP_ASYNC, CAP_BIG_ENDIAN, CAP_FEC, CAP_NEW_GEN};
+
+    /// The advertised word must match what C `udps-negotiate.c` builds:
+    /// SENDER_CAPABILITIES (CAP_NEW_GEN | CAP_BIG_ENDIAN) plus CAP_ASYNC in
+    /// async mode. C 2012 never sets CAP_FEC even with `-F`; this port adds
+    /// it when FEC is in use (see sender_capabilities).
+    #[test]
+    fn sender_capabilities_matches_c() {
+        assert_eq!(
+            protocol::SENDER_CAPABILITIES,
+            CAP_NEW_GEN | CAP_BIG_ENDIAN,
+            "base word must equal C's SENDER_CAPABILITIES"
+        );
+        assert_eq!(sender_capabilities(0), protocol::SENDER_CAPABILITIES);
+        assert_eq!(
+            sender_capabilities(FLAG_ASYNC),
+            CAP_NEW_GEN | CAP_BIG_ENDIAN | CAP_ASYNC
+        );
+        assert_eq!(
+            sender_capabilities(FLAG_FEC),
+            CAP_NEW_GEN | CAP_BIG_ENDIAN | CAP_FEC
+        );
+        assert_eq!(
+            sender_capabilities(FLAG_FEC | FLAG_ASYNC),
+            CAP_NEW_GEN | CAP_BIG_ENDIAN | CAP_FEC | CAP_ASYNC
+        );
+        // Unrelated flags must not change the word (C: only ASYNC/FEC do).
+        assert_eq!(
+            sender_capabilities(FLAG_SN | FLAG_POINTOPOINT | FLAG_BCAST),
+            protocol::SENDER_CAPABILITIES
+        );
+    }
 }

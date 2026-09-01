@@ -20,6 +20,16 @@ behavior are capability-gated and never affect C peers.
   (`--min-slice-size` … `--max-slice-size`), like the original.
 - **Rate control**: `--max-bitrate` and `--auto-bitrate` governors
   (C `rate` equivalent).
+- **Forward error correction** (`-F [stripes]x[redundancy]/[stripesize]`):
+  the sender appends Reed-Solomon parity blocks to every slice, so a
+  receiver can reconstruct up to `redundancy` lost blocks per stripe without
+  a retransmission round. This port also advertises `CAP_FEC` in the
+  sender's `HELLO`/`CONNECT_REPLY` while `-F` is in use — the 2012 C sender
+  defines the bit but never raises it (its receivers turn FEC on by the
+  arrival of `CMD_FEC` packets), so the extra bit is ignored by old peers
+  and is safe. `-L` prints the exact license text of the FEC code (GPL for
+  udpcast plus the BSD license of the Reed-Solomon code) and exits, byte-for
+  byte like C's `-L`.
 - **Late-join self-healing** (Rust extension, `CAP_LATE_JOIN = 0x0040`):
   if a receiver misses its one-shot `CONNECT_REPLY` entirely, it sniffs the
   data channel during the start phase, learns which slices were already sent,
@@ -81,6 +91,8 @@ Useful options (see `--help`):
 -r   max bitrate, e.g. -r 50m
 -A   autorate (adaptive rate control)
 -b   block size (default 1456)
+-F   FEC: [stripes]x[redundancy]/[stripesize], e.g. -F 8x2/128
+-L   print the FEC code license (like C's `-L`) and exit
 --min-slice-size / --default-slice-size / --max-slice-size
 -R   --retries-until-drop         (default 200)
 -T/-s --start-timeout             -D --daemon-mode
@@ -135,7 +147,7 @@ src/
   fifo.rs / produconsum.rs  thread-safe producer/consumer ring
   participants.rs        participant table (C db equivalent)
   rate.rs                max/auto bitrate governors
-  fec.rs                 Reed-Solomon (present but not advertised)
+  fec.rs                 Reed-Solomon (advertised via CAP_FEC while -F is in use)
   socklib.rs             sockets, mcast, interface handling
   statistics.rs / console.rs / diskio.rs / process.rs / util.rs
 tests/multi_receiver.rs  in-process protocol round-trip tests
@@ -147,5 +159,8 @@ GPL-2.0 (see `LICENSE`).
 
 The wire protocol is that of udpcast, © 2001–2012 Alain Knaff
 (http://udpcast.linux.lu/), GPL-2. The forward-error-correction module
-descends from the Rizzo/Karn/Morelos-Zarozo work (BSD); it is not enabled
-in this port (the sender does not advertise `CAP_FEC`).
+descends from the Rizzo/Karn/Morelos-Zaragoza work (BSD); it is fully
+functional here (enable it with `-F`) and the sender advertises it with
+`CAP_FEC` — a deliberate extension, since the 2012 C sender never raised
+that bit. `udp-sender -L` prints the exact combined license text the C
+binaries print and exits.

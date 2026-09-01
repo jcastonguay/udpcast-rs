@@ -161,7 +161,9 @@ struct Cli {
     #[arg(short = 'F', long = "fec")]
     fec: Option<String>,
 
-    /// Print the license of the FEC code (like C's `-L`) and carry on.
+    /// C's `-L` prints the license of the FEC code (GPL for udpcast plus the
+    /// BSD license of the Reed-Solomon code) and stops right out of the
+    /// option-parsing loop, before any transfer setup (`udp-sender.c` case 'L').
     #[arg(short = 'L', long = "license")]
     license: bool,
 
@@ -209,8 +211,10 @@ fn setup_pidfile(path: &str) {
 }
 
 /// Parse the `--fec` spec `[stripes]x[redundancy][/stripesize]`.
-/// Mirrors C `udp-sender.c` case 'F'. Returns (stripes, redundancy, stripesize).
-fn parse_fec_spec(spec: &str) -> (u32, u32, u32) {
+/// Mirrors C `udp-sender.c` case 'F': without `x` the default is 8 stripes
+/// and the whole string is the redundancy; without `/` the stripesize
+/// defaults to 128. Returns (stripes, redundancy, stripesize).
+pub(crate) fn parse_fec_spec(spec: &str) -> (u32, u32, u32) {
     let (stripes, rest) = match spec.find('x') {
         Some(pos) => {
             let s: u32 = spec[..pos].parse().unwrap_or_else(|_| {
@@ -242,6 +246,12 @@ fn parse_fec_spec(spec: &str) -> (u32, u32, u32) {
 
 pub fn run_sender() {
     let cli = Cli::parse();
+
+    // C fires this straight out of the option-parsing loop, before the
+    // sockets are opened or a transfer is set up: print and exit(0).
+    if cli.license {
+        crate::fec::fec_license();
+    }
 
     let mut disk_config = DiskConfig {
         orig_out_file: false,
@@ -294,6 +304,8 @@ pub fn run_sender() {
         fec_stripes = s;
         fec_redundancy = r;
         fec_stripesize = ss;
+        // Same stderr diagnostic as C's case 'F'.
+        eprintln!("stripes={} redund={} stripesize={}", s, r, ss);
     }
 
     let mut block_size = cli.block_size;
@@ -365,13 +377,7 @@ pub fn run_sender() {
         mcast_rdv: cli.mcast_rdv_address.clone(),
         ttl: cli.ttl,
         flags,
-        capabilities: {
-            let mut caps = crate::protocol::SENDER_CAPABILITIES;
-            if flags & crate::senddata::FLAG_ASYNC != 0 {
-                caps |= crate::protocol::CAP_ASYNC;
-            }
-            caps
-        },
+        capabilities: crate::senddata::sender_capabilities(flags),
         min_slice_size,
         default_slice_size,
         max_slice_size,
@@ -469,5 +475,24 @@ fn daemonize() {
             libc::dup2(fd, 1);
             libc::dup2(fd, 2);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// C `udp-sender.c` case 'F': `[stripes]x[redundancy][/stripesize]`.
+    /// Default stripes 8, default stripesize 128; a bare number is the
+    /// redundancy (with the default 8 stripes).
+    #[test]
+    fn parse_fec_spec_forms() {
+        assert_eq!(parse_fec_spec("8x2/128"), (8, 2, 128));
+        assert_eq!(parse_fec_spec("8x2"), (8, 2, 128));
+        assert_eq!(parse_fec_spec("2"), (8, 2, 128));
+        assert_eq!(parse_fec_spec("8"), (8, 8, 128));
+        assert_eq!(parse_fec_spec("4x3/64"), (4, 3, 64));
+        assert_eq!(parse_fec_spec("16x4/256"), (16, 4, 256));
+        assert_eq!(parse_fec_spec("8x8/16"), (8, 8, 16));
     }
 }

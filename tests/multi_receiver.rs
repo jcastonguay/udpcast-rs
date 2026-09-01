@@ -259,3 +259,257 @@ fn two_receivers_gate_acks_and_retransmits() {
         }
     }
 }
+
+// ---------------------------------------------------------------------
+// Full sender entry point (negotiation + transfer phase), like C's
+// `udp-sender -F ...`: with `-F`, the advertised capabilities word
+// (SENDER_CAPABILITIES | CAP_FEC) must appear in both the HELLO and the
+// CONNECT_REPLY, and every CMD_FEC block the sender emits must be a
+// genuine Reed-Solomon encoding of that slice's data blocks.
+// C 2012 defines CAP_FEC but never raises it; advertising it here is
+// what distinguishes this port (see senddata::sender_capabilities).
+// ---------------------------------------------------------------------
+
+#[test]
+fn fec_sender_advertises_cap_fec_on_the_wire() {
+    use udpcast::diskio::DiskConfig;
+    use udpcast::negotiate::{start_sender_with_socks, SenderSocks};
+    use udpcast::sender::StatConfig;
+
+    let port_base: u16 = 9299;
+    let block_size: u32 = 512;
+    let slice_blocks = 8usize;
+    let nr_slices = 3;
+    let total = nr_slices * slice_blocks * block_size as usize;
+    let stripes = 2usize;
+    let redundancy = 2usize;
+    let expected_caps = protocol::SENDER_CAPABILITIES | protocol::CAP_FEC;
+
+    // Deterministic payload written to a temp file (do_transfer's disk
+    // reader feeds the FIFO from it; the zero-byte trailer slice ends the
+    // transfer, like an EOF on a real file).
+    let mut payload = Vec::with_capacity(total);
+    for i in 0..total {
+        payload.push((i * 7 + 13) as u8);
+    }
+    let dir = std::env::temp_dir().join(format!("udpcast-rs-fec-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("fec.bin");
+    std::fs::write(&path, &payload).unwrap();
+
+    let self_addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), port_base);
+    let observer = UdpSocket::bind(self_addr).unwrap();
+    observer.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+    // The one "receiver": a real socket, registered via CONNECT_REQ.
+    let part = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 2), port_base))
+        .unwrap();
+    part.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+
+    let flags = FLAG_SN | senddata::FLAG_FEC | senddata::FLAG_NOKBD;
+    let cfg: &'static mut NetConfig = Box::leak(Box::new(NetConfig {
+        net_if: None,
+        port_base,
+        block_size,
+        slice_size: 8,
+        control_mcast_addr: self_addr,
+        data_mcast_addr: self_addr,
+        mcast_rdv: None,
+        ttl: 0,
+        flags,
+        capabilities: 0, // start_sender_with_socks fills this in
+        min_slice_size: 1,
+        // slice sizes are in blocks: 8 blocks x 512 B = one 4 KiB slice. The
+        // FEC rule caps a slice at 128 x stripes blocks (256 here), far above
+        // our 8.
+        default_slice_size: 8,
+        max_slice_size: 128 * stripes as u32,
+        rcvbuf: 0,
+        rexmit_hello_interval: 0,
+        autostart: 0,
+        requested_buf_size: 0,
+        min_receivers: 1,
+        max_receivers_wait: 0,
+        min_receivers_wait: 0,
+        retries_until_drop: 1_000_000,
+        rehello_offset: 0,
+        start_timeout: 0,
+        discovery: Discovery::Doubling,
+        fec_stripes: stripes as u32,
+        fec_redundancy: redundancy as u32,
+        fec_stripesize: 128,
+        max_bitrate: None,
+        autorate: false,
+    }));
+    let stat: &'static StatConfig = Box::leak(Box::new(StatConfig {
+        log: None,
+        bw_period: 0,
+        print_uncompressed_pos: 0,
+        stat_period: 0,
+        no_progress: true,
+    }));
+    let disk: &'static DiskConfig = Box::leak(Box::new(DiskConfig {
+        orig_out_file: false,
+        file_name: Some(path.to_string_lossy().into_owned()),
+        pipe_name: None,
+        flags: 0,
+    }));
+
+    let main = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let sender_addr = main.local_addr().unwrap();
+    let handle = std::thread::spawn(move || {
+        start_sender_with_socks(disk, cfg, stat, SenderSocks {
+            main,
+            extra: vec![],
+        })
+    });
+
+    // The receiver connects; the CONNECT_REPLY is the first thing that
+    // carries the advertised capabilities word.
+    let req = protocol::ConnectReq {
+        capabilities: protocol::RECEIVER_CAPABILITIES,
+        rcvbuf: 4096,
+    };
+    part.send_to(&req.pack(), &sender_addr).unwrap();
+
+    let mut buf = [0u8; 2048];
+    let mut reply_caps = 0u32;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while reply_caps == 0 && Instant::now() < deadline {
+        if let Ok((n, _)) = part.recv_from(&mut buf) {
+            if n >= protocol::CONNECT_REPLY_SIZE {
+                reply_caps = protocol::ConnectReply::unpack(&buf).capabilities;
+            }
+        }
+    }
+    assert_eq!(
+        reply_caps, expected_caps,
+        "CONNECT_REPLY must carry SENDER_CAPABILITIES | CAP_FEC (got {:08x})",
+        reply_caps
+    );
+
+    // Drain the data phase from both sockets: with a single participant the
+    // sender is point-to-point, so DATA/FEC/REQACK go straight to the
+    // participant's address while the HELLO is still sent to the "control"
+    // address. Answer every REQACK with an OK from the registered address,
+    // exactly as a real receiver's control socket would.
+    let mut hello_caps: Vec<u32> = Vec::new();
+    let mut data: HashMap<i32, Vec<(u16, Vec<u8>)>> = HashMap::new();
+    let mut fec: HashMap<i32, Vec<(u16, i32, Vec<u8>)>> = HashMap::new();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if handle.is_finished() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "sender did not finish");
+        for sock in [&observer, &part] {
+            if let Ok((n, _)) = sock.recv_from(&mut buf) {
+                if n < 4 {
+                    continue;
+                }
+                let op = u16::from_be_bytes([buf[0], buf[1]]);
+                match op {
+                    protocol::CMD_HELLO_NEW | protocol::CMD_HELLO_STREAMING
+                        if n >= protocol::HELLO_SIZE =>
+                    {
+                        hello_caps.push(protocol::Hello::unpack(&buf).capabilities);
+                    }
+                    protocol::CMD_DATA if n >= 16 + block_size as usize => {
+                        let d = protocol::DataBlock::unpack(&buf);
+                        data.entry(d.slice_no)
+                            .or_default()
+                            .push((d.block_no, buf[16..n].to_vec()));
+                    }
+                    protocol::CMD_FEC if n >= protocol::FEC_BLOCK_SIZE + block_size as usize => {
+                        let f = protocol::FecBlock::unpack(&buf);
+                        fec.entry(f.slice_no)
+                            .or_default()
+                            .push((
+                                f.block_no,
+                                f.stripes,
+                                buf[protocol::FEC_BLOCK_SIZE..protocol::FEC_BLOCK_SIZE + block_size as usize]
+                                    .to_vec(),
+                            ));
+                    }
+                    protocol::CMD_REQACK if n >= protocol::REQACK_SIZE => {
+                        let r = protocol::Reqack::unpack(&buf);
+                        let _ = part.send_to(
+                            &protocol::OkMsg {
+                                slice_no: r.slice_no,
+                            }
+                            .pack(),
+                            &sender_addr,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    let code = handle.join().unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(code, 0, "transfer must complete");
+
+    // Every HELLO carried the same advertised word as the reply.
+    assert!(!hello_caps.is_empty(), "no HELLO observed");
+    for c in &hello_caps {
+        assert_eq!(*c, expected_caps, "HELLO capabilities must be {:08x}", expected_caps);
+    }
+
+    // Every slice: all data blocks intact, exactly stripes*redundancy FEC
+    // blocks with the right header, and each parity block must equal a
+    // fresh Reed-Solomon encoding of the slice's data blocks (the same
+    // per-stripe layout the receiver relies on).
+    udpcast::fec::fec_init();
+    for s in 0..nr_slices {
+        let d = data
+            .get(&(s as i32))
+            .unwrap_or_else(|| panic!("no DATA for slice {}", s));
+        assert_eq!(d.len(), slice_blocks, "slice {} data blocks", s);
+        let mut d: Vec<(u16, Vec<u8>)> = d.clone();
+        d.sort_by_key(|(b, _)| *b);
+        for (i, (b, blk)) in d.iter().enumerate() {
+            assert_eq!(*b, i as u16, "slice {} block order", s);
+            assert_eq!(blk.len(), block_size as usize, "slice {} block {} size", s, i);
+            let off = s * slice_blocks * block_size as usize + i * block_size as usize;
+            assert_eq!(
+                &blk[..],
+                &payload[off..off + block_size as usize],
+                "payload mismatch slice {} block {}",
+                s,
+                i
+            );
+        }
+        let f = fec
+            .get(&(s as i32))
+            .unwrap_or_else(|| panic!("no FEC for slice {}", s));
+        assert_eq!(
+            f.len(),
+            stripes * redundancy,
+            "slice {} fec count",
+            s
+        );
+        for (_bno, stripes_f, _) in f {
+            assert_eq!(*stripes_f, stripes as i32, "slice {} fec stripes field", s);
+        }
+        for stripe in 0..stripes {
+            let per_stripe = slice_blocks / stripes;
+            let positions: Vec<usize> =
+                (0..per_stripe).map(|j| stripe + j * stripes).collect();
+            let data_ptrs: Vec<&[u8]> =
+                positions.iter().map(|&p| d[p].1.as_slice()).collect();
+            let mut par: Vec<Vec<u8>> = vec![vec![0u8; block_size as usize]; redundancy];
+            let mut par_ptrs: Vec<&mut [u8]> = par.iter_mut().map(|b| b.as_mut_slice()).collect();
+            udpcast::fec::fec_encode(block_size as usize, &data_ptrs, &mut par_ptrs);
+            for (r, expect) in par.iter().enumerate() {
+                let bno = stripe + r * stripes;
+                let got = f
+                    .iter()
+                    .find(|(b, _, _)| *b as usize == bno)
+                    .unwrap_or_else(|| panic!("no FEC block {} of slice {}", bno, s))
+                    .2
+                    .clone();
+                assert_eq!(&got[..], &expect[..], "parity mismatch slice {} bno {}", s, bno);
+            }
+        }
+    }
+}
