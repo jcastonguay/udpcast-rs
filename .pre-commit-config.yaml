@@ -1,0 +1,18 @@
+repos:
+  # --- MULTI-LANGUAGE FORMATTING & YAML ---
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      #      - id: trailing-whitespace
+      #      - id: end-of-file-fixer
+      #      - id: check-yaml
+      #        description: Lints and validates your YAML configuration files.
+      - id: check-added-large-files
+
+  # dprint is the single formatter for all non-Kotlin languages
+  # (TS/JS, JSON, Markdown, YAML, TOML, Dockerfile, CSS, HTML, shell).
+  # Kotlin is formatted by Spotless/ktlint (./gradlew spotlessApply).
+  - repo: https://github.com/trim21/dprint-pre-commit
+    rev: v0.55.2.0 # Use the latest matching dprint version
+    hooks:
+      - id: dprint
