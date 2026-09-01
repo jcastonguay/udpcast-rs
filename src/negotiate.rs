@@ -239,7 +239,7 @@ fn dispatch_round(
 ) -> i32 {
     use nix::sys::select::{select, FdSet};
     use nix::sys::time::TimeVal;
-    use std::os::unix::io::{AsRawFd, BorrowedFd};
+    use std::os::unix::io::{AsFd, AsRawFd};
 
     if first_connected.is_none() && db.lock().unwrap().nr_participants() > 0 {
         *first_connected = Some(Instant::now());
@@ -258,8 +258,7 @@ fn dispatch_round(
     let mut read_set = FdSet::new();
     let mut max_fd = 0i32;
     for s in socks.iter() {
-        let bfd = unsafe { BorrowedFd::borrow_raw(s.as_raw_fd()) };
-        read_set.insert(bfd);
+        read_set.insert(s.as_fd());
         if s.as_raw_fd() >= max_fd {
             max_fd = s.as_raw_fd() + 1;
         }
@@ -267,7 +266,7 @@ fn dispatch_round(
 
     let mut key_pressed = false;
     let ret = match console.as_mut() {
-        Some(c) => match c.select_with_console(&mut max_fd, &mut read_set, tick.as_ref()) {
+        Some(c) => match c.select_with_console(&mut max_fd, &read_set, tick.as_ref()) {
             Ok((n, kp)) => {
                 key_pressed = kp;
                 n
@@ -294,7 +293,7 @@ fn dispatch_round(
                 return DISPATCH_START;
             }
         }
-        if wait_for_receivers(net_config) && check_client_wait(db, net_config, *first_connected) {
+        if check_client_wait(db, net_config, *first_connected) {
             return DISPATCH_START;
         }
         if net_config.start_timeout > 0
@@ -328,7 +327,7 @@ fn dispatch_round(
     // all C does, but reading until empty converges faster when many receivers
     // register at the same instant.
     for s in socks.iter() {
-        if !read_set.contains(unsafe { BorrowedFd::borrow_raw(s.as_raw_fd()) }) {
+        if !read_set.contains(s.as_fd()) {
             continue;
         }
         let mut buf = [0u8; 256];
@@ -361,7 +360,9 @@ fn dispatch_round(
     }
 
     // A disconnect may have emptied the participant list.
-    if wait_for_receivers(net_config) && check_client_wait(db, net_config, *first_connected) {
+    // C calls checkClientWait whenever a receiver has connected; the
+    // min/max receiver counts (default: min 0, no waits) decide when to start.
+    if check_client_wait(db, net_config, *first_connected) {
         return DISPATCH_START;
     }
     DISPATCH_WAIT
@@ -456,11 +457,7 @@ pub fn start_sender_with_socks(
     // A console is prepared unless -k/--nokbd, and it is stdin when the data
     // comes from a file (-f) /dev/tty otherwise (-p pipe or stdin data).
     let mut console = if net_config.flags & senddata::FLAG_NOKBD == 0 {
-        Console::prepare(if disk_config.file_name.is_some() {
-            Some(0)
-        } else {
-            None
-        })
+        Console::prepare(disk_config.file_name.is_some())
     } else {
         None
     };
@@ -611,17 +608,22 @@ fn do_transfer(
     }
 
     let orig_in = crate::diskio::open_file(disk_config);
-    let mut pipe_pid = 0i32;
-    let in_fd = crate::diskio::open_pipe_sender(disk_config, orig_in, &mut pipe_pid);
+
+    // C udp-sender.c:635: the optional coprocess between the local reader
+    // and the network sender (`-p`): the coprocess reads the input (or
+    // stdin) and its stdout becomes our new input. C's open_pipe_sender
+    // did fork+dup2+execvp; Command hands the child copies of the fds.
+    let mut pipe = crate::diskio::open_pipe_sender(disk_config, &orig_in);
+    let in_src = pipe.as_ref().map(|p| &p.read_end).unwrap_or(&orig_in);
 
     let print_uncompressed_pos = crate::statistics::should_print_uncompressed_pos(
         stat_config.print_uncompressed_pos,
-        orig_in,
-        in_fd,
+        orig_in.raw_fd(),
+        in_src.raw_fd(),
     );
 
     let mut stats = crate::statistics::SenderStats::new(
-        orig_in,
+        orig_in.raw_fd(),
         stat_config.bw_period,
         stat_config.stat_period,
         print_uncompressed_pos,
@@ -635,15 +637,15 @@ fn do_transfer(
 
     // The network thread *borrows* the socket, the net config and the stats
     // (scoped thread) instead of being handed a `ptr::read` copy of them: the
-    // raw copy left a dangling struct in this frame, which the next transfer
-    // (daemon mode / -D) then read back as garbage - e.g. a rendezvous address
-    // that silently turned into the default one.
+    // raw copy left a dangling struct in this frame, which a second transfer
+    // round (the old `-D` loop) would have read back as garbage - e.g. a
+    // rendezvous address that silently turned into the default one.
     std::thread::scope(|s| {
         s.spawn(|| {
             senddata::spawn_net_sender(
                 &fifo.data,
                 &fifo.free_mem_queue,
-                fifo.buffer(),
+                &fifo.buffer,
                 fifo.data_buf_size,
                 sock,
                 extra_socks,
@@ -652,17 +654,16 @@ fn do_transfer(
                 &mut stats,
             );
         });
-        crate::diskio::local_reader_fifo(&fifo, in_fd);
+        crate::diskio::local_reader_fifo(&fifo, in_src);
     });
 
-    if pipe_pid != 0 {
-        crate::process::wait_for_process(pipe_pid, "Pipe");
+    if let Some(p) = &mut pipe {
+        crate::process::wait_for_child(&mut p.child, "Pipe");
     }
 
     stats.display(block_size, slice_size, true);
-    if in_fd != orig_in {
-        let _ = nix::unistd::close(orig_in);
-    }
+    // The input handle (and the coprocess's pipe end) drops here, which
+    // closes the file fd; stdin/stdout are the process's own handles.
 
     util::flprintf("Transfer complete.\x07\n");
 

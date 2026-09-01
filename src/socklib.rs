@@ -86,34 +86,25 @@ pub fn get_send_buf(sock: &UdpSocket) -> io::Result<u32> {
     s.send_buffer_size().map(|v| v as u32)
 }
 
-/// Bytes currently queued in the socket's send buffer (TIOCOUTQ).
-pub fn get_send_queue(fd: i32) -> i32 {
+/// Bytes currently queued in the socket's send buffer, or -1 on error.
+/// Mirrors C `auto-rate.c`'s `getCurrentQueueLength()`.
+///
+/// TIOCOUTQ has no safe binding in any available crate (checked nix 0.31,
+/// rustix 1.1, socket2 0.6 — rustix's own `ioctl()` is `unsafe fn`), so this
+/// stays a minimal direct call with the unsafe confined to one block.
+pub fn get_send_queue(sock: &UdpSocket) -> i32 {
     let mut length: libc::c_int = 0;
-    let r = unsafe { libc::ioctl(fd, libc::TIOCOUTQ, &mut length) };
+    // SAFETY: `TIOCOUTQ` is a read-only (getter) ioctl: the kernel only
+    // writes the single `c_int` in `length`. `sock` is a valid, open UDP
+    // socket for the whole call.
+    let r = unsafe {
+        use std::os::unix::io::AsRawFd;
+        libc::ioctl(sock.as_raw_fd(), libc::TIOCOUTQ, &mut length)
+    };
     if r < 0 {
         -1
     } else {
         length
-    }
-}
-
-/// SO_SNDBUF read directly on a raw fd (does not take ownership).
-pub fn get_send_buf_fd(fd: i32) -> i32 {
-    let mut size: libc::c_int = 0;
-    let mut len: libc::socklen_t = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
-    let r = unsafe {
-        libc::getsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_SNDBUF,
-            &mut size as *mut libc::c_int as *mut libc::c_void,
-            &mut len,
-        )
-    };
-    if r < 0 {
-        0
-    } else {
-        size
     }
 }
 
@@ -159,18 +150,33 @@ pub fn set_ttl(sock: &UdpSocket, ttl: i32) -> io::Result<()> {
     sock.set_ttl(ttl as u32)
 }
 
-pub fn set_mcast_destination(sock: &UdpSocket, net_if: &NetIf, _addr: &SocketAddrV4) -> io::Result<()> {
-    use std::os::unix::io::AsRawFd;
-    let mcast_if = net_if.addr;
-    let addr_bytes = mcast_if.octets();
+/// Pick the outbound interface for multicast packets (`IP_MULTICAST_IF`).
+/// Mirrors C `socklib.c`'s `setMcastDestination()`/`fillMreq()`: the kernel
+/// selects the interface by `imr_ifindex`; the other two fields match C's
+/// `fillMreq()` layout (`imr_multiaddr` = the mcast address, `imr_address`
+/// = 0) and are ignored by the kernel when `imr_ifindex` is non-zero.
+///
+/// No available crate (checked nix 0.31, rustix 1.1, socket2 0.6) wraps
+/// `IP_MULTICAST_IF`, so this stays a minimal direct `setsockopt`.
+pub fn set_mcast_destination(
+    sock: &UdpSocket,
+    net_if: &NetIf,
+    addr: &SocketAddrV4,
+) -> io::Result<()> {
     let mreqn = libc::ip_mreqn {
-        imr_multiaddr: libc::in_addr { s_addr: 0 },
+        imr_multiaddr: libc::in_addr {
+            s_addr: u32::from_be_bytes(addr.ip().octets()),
+        },
         imr_address: libc::in_addr {
-            s_addr: u32::from_be_bytes(addr_bytes),
+            s_addr: 0,
         },
         imr_ifindex: net_if.index,
     };
+    // SAFETY: `IP_MULTICAST_IF` takes a fixed-size 20-byte `ip_mreqn` that
+    // contains no pointers; the struct is fully initialized above and stays
+    // alive for the duration of the call.
     let ret = unsafe {
+        use std::os::unix::io::AsRawFd;
         libc::setsockopt(
             sock.as_raw_fd(),
             libc::IPPROTO_IP,
@@ -191,7 +197,7 @@ pub fn is_full_duplex(_sock: &UdpSocket, _ifname: &str) -> i32 {
 
 pub fn get_net_if(wanted: Option<&str>) -> NetIf {
     use std::collections::HashMap;
-    use std::ffi::CStr;
+    use nix::ifaddrs::getifaddrs;
 
     let wanted: Option<String> = wanted.map(|s| s.to_string()).or_else(|| std::env::var("IFNAME").ok());
 
@@ -203,35 +209,30 @@ pub fn get_net_if(wanted: Option<&str>) -> NetIf {
 
     let mut seen: HashMap<String, (Ipv4Addr, Ipv4Addr, i32)> = HashMap::new();
 
-    unsafe {
-        let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
-        if libc::getifaddrs(&mut ifap) != 0 {
-            eprintln!("getifaddrs failed: {}", std::io::Error::last_os_error());
+    let ifaddrs = match getifaddrs() {
+        Ok(it) => it,
+        Err(e) => {
+            eprintln!("getifaddrs failed: {}", e);
             std::process::exit(1);
         }
+    };
+    for ifa in ifaddrs {
+        let Some(addr) = ifa.address.as_ref().and_then(|a| a.as_sockaddr_in()) else {
+            continue;
+        };
+        let bcast = ifa
+            .broadcast
+            .as_ref()
+            .and_then(|b| b.as_sockaddr_in())
+            .map(|s| s.ip())
+            .unwrap_or(Ipv4Addr::UNSPECIFIED);
+        let idx = nix::net::if_::if_nametoindex(ifa.interface_name.as_str()).map(|i| i as i32).unwrap_or(0);
+        seen.entry(ifa.interface_name).or_insert((addr.ip(), bcast, idx));
+    }
 
-        let mut cur = ifap;
-        while !cur.is_null() {
-            let ifa = &*cur;
-            if !ifa.ifa_addr.is_null() && (*ifa.ifa_addr).sa_family as i32 == libc::AF_INET {
-                let name = CStr::from_ptr(ifa.ifa_name).to_string_lossy().into_owned();
-                let sin = &*(ifa.ifa_addr as *const libc::sockaddr_in);
-                let addr = Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
-
-                let mut bcast = Ipv4Addr::UNSPECIFIED;
-                if !ifa.ifa_ifu.is_null() {
-                    let sin_bcast = &*(ifa.ifa_ifu as *const libc::sockaddr_in);
-                    bcast = Ipv4Addr::from(u32::from_be(sin_bcast.sin_addr.s_addr));
-                }
-
-                let c_name = std::ffi::CString::new(name.as_str()).unwrap();
-                let idx = libc::if_nametoindex(c_name.as_ptr()) as i32;
-
-                seen.entry(name).or_insert((addr, bcast, idx));
-            }
-            cur = ifa.ifa_next;
-        }
-        libc::freeifaddrs(ifap);
+    if seen.is_empty() {
+        eprintln!("getifaddrs failed: no IPv4 interfaces found");
+        std::process::exit(1);
     }
 
     for (name, (addr, bcast, idx)) in &seen {
@@ -330,17 +331,9 @@ pub fn make_socket(
     if sock.bind(&socket2::SockAddr::from(bind_addr)).is_err() {
         #[cfg(any(target_os = "linux", target_os = "android"))]
         {
-            use std::os::unix::io::AsRawFd;
-            let optval: libc::c_int = 1;
-            unsafe {
-                libc::setsockopt(
-                    sock.as_raw_fd(),
-                    libc::SOL_SOCKET,
-                    libc::SO_REUSEPORT,
-                    &optval as *const _ as *const libc::c_void,
-                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                );
-            }
+            use nix::sys::socket::sockopt::ReusePort;
+            use nix::sys::socket::setsockopt;
+            let _ = setsockopt(&sock, ReusePort, &true);
         }
         sock.bind(&socket2::SockAddr::from(bind_addr)).ok()?;
     }

@@ -1,3 +1,4 @@
+use std::net::UdpSocket;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[allow(dead_code)]
@@ -9,7 +10,7 @@ pub struct RateGovernor {
 pub trait RateGovernorData: Send {
     fn set_prop(&mut self, _key: &str, _value: &str) {}
     fn end_config(&mut self) {}
-    fn wait(&mut self, _fd: i32, _ip: u32, _size: i64) {}
+    fn wait(&mut self, _sock: &UdpSocket, _ip: u32, _size: i64) {}
     fn shutdown(&mut self) {}
 }
 
@@ -26,7 +27,7 @@ impl RateGovernorData for MaxBitrateData {
         }
     }
 
-    fn wait(&mut self, _fd: i32, _ip: u32, size: i64) {
+    fn wait(&mut self, _sock: &UdpSocket, _ip: u32, size: i64) {
         if self.bitrate == 0 {
             return;
         }
@@ -72,12 +73,12 @@ impl AutoRateData {
 }
 
 impl RateGovernorData for AutoRateData {
-    fn wait(&mut self, fd: i32, _ip: u32, size: i64) {
+    fn wait(&mut self, sock: &UdpSocket, _ip: u32, size: i64) {
         if !self.is_initialized {
-            let q = crate::socklib::get_send_queue(fd);
+            let q = crate::socklib::get_send_queue(sock);
             if q == 0 {
                 self.dir = 0;
-                self.sendbuf = crate::socklib::get_send_buf_fd(fd);
+                self.sendbuf = crate::socklib::get_send_buf(sock).map(|v| v as i32).unwrap_or(0);
             } else {
                 self.dir = 1;
                 self.sendbuf = q;
@@ -85,7 +86,7 @@ impl RateGovernorData for AutoRateData {
             self.is_initialized = true;
         }
         loop {
-            let mut r = crate::socklib::get_send_queue(fd);
+            let mut r = crate::socklib::get_send_queue(sock);
             if r < 0 {
                 return;
             }
@@ -155,9 +156,9 @@ impl RateGovernorSet {
         });
     }
 
-    pub fn wait_all(&mut self, fd: i32, ip: u32, size: i64) {
+    pub fn wait_all(&mut self, sock: &UdpSocket, ip: u32, size: i64) {
         for gov in &mut self.governors {
-            gov.data.wait(fd, ip, size);
+            gov.data.wait(sock, ip, size);
         }
     }
 

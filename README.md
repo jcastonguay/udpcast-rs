@@ -95,9 +95,10 @@ Useful options (see `--help`):
 -L   print the FEC code license (like C's `-L`) and exit
 --min-slice-size / --default-slice-size / --max-slice-size
 -R   --retries-until-drop         (default 200)
--T/-s --start-timeout             -D --daemon-mode
+-T/-s --start-timeout
 --receive-timeout (receiver)
--l   log file                     -p   pipe to command instead of -f
+-l   log file                     -k   --nokbd, --no-progress (headless use)
+-p   pipe to command instead of -f
 ```
 
 Example: one sender, three receivers on 10.0.0.0/24:
@@ -108,6 +109,39 @@ udp-receiver -i eth0 -f file.bin
 # sender side
 udp-sender -i eth0 -f file.bin
 ```
+
+## Running as a service
+
+Unlike the C original, `udp-sender` does not daemonize itself: `-D` / `--daemon-mode`
+(fork + setsid + pid file + `-K/--kill`) was deliberately not ported. Run it under
+a process supervisor instead — systemd works out of the box:
+
+```ini
+# /etc/systemd/system/udp-sender.service
+[Unit]
+Description=udpcast file sender
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# --no-progress + -k: what -DD used to force automatically in daemon mode
+ExecStart=/usr/local/bin/udp-sender -i eth0 -P 9000 -f /srv/transfer/file.bin -k --no-progress
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Notes:
+
+- Each invocation sends the file once and exits; `Restart=on-failure` (or
+  `always`) reproduces the C `-D` "keep serving transfers until killed" behavior —
+  a receiver that joins later starts the next run.
+- `systemctl stop` sends SIGTERM; there is no pid file to clean up, systemd
+  tracks the process itself.
+- For a live stream (`-Z/--streaming`) use `Restart=always` so the service
+  comes back up after every stop.
 
 ## Testing
 
@@ -131,8 +165,8 @@ CAPTURE=1   # keep per-host pcap captures
 UDPC_DEBUG=1  # verbose DBG logging
 ```
 
-`test_matrix.sh` sweeps scenarios in bulk; `test_daemon.sh` and
-`test_integration.sh` cover daemon mode and basic single-pair transfers.
+`test_matrix.sh` sweeps scenarios in bulk; `test_integration.sh` covers basic
+single-pair transfers.
 
 ## Layout
 

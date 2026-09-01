@@ -204,10 +204,8 @@ pub fn msleep(ms: u64) {
 
 /// Parse a command string like "/bin/gzip -c" into a Vec of CStrings
 /// suitable for execvp.
-pub fn parse_command(cmd: &str) -> Vec<std::ffi::CString> {
-    cmd.split_whitespace()
-        .map(|s| std::ffi::CString::new(s).unwrap())
-        .collect()
+pub fn parse_command(cmd: &str) -> Vec<std::ffi::OsString> {
+    cmd.split_whitespace().map(std::ffi::OsString::from).collect()
 }
 
 /// Timestamp (seconds since process start) for debug logging.

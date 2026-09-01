@@ -1,51 +1,29 @@
-use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
-use nix::unistd::{close, dup2, execvp, fork, ForkResult};
-use std::ffi::CString;
-use std::os::unix::io::RawFd;
+//! Child-process helpers for the `-p` coprocesses.
+//!
+//! The coprocesses themselves are spawned with `std::process::Command`
+//! (see `crate::diskio::open_pipe_sender` / `open_pipe_receiver`); this
+//! module only waits for them.
 
-pub fn open2(in_fd: RawFd, out_fd: RawFd, args: &[CString], close_fd: Option<RawFd>) -> i32 {
-    match unsafe { fork() } {
-        Ok(ForkResult::Child) => {
-            dup_fd(in_fd, 0);
-            dup_fd(out_fd, 1);
-            if let Some(fd) = close_fd {
-                let _ = close(fd);
-            }
-            let _ = execvp(&args[0], args);
-            crate::util::fatal(1, &format!("exec {}: {}\n", args[0].to_string_lossy(), std::io::Error::last_os_error()));
-        }
-        Ok(ForkResult::Parent { child }) => child.as_raw() as i32,
-        Err(e) => {
-            eprintln!("fork: {}", e);
-            -1
-        }
-    }
-}
+use std::os::unix::process::ExitStatusExt;
 
-fn dup_fd(src: RawFd, target: RawFd) {
-    if src != target {
-        let _ = close(target);
-        if let Err(e) = dup2(src, target) {
-            crate::util::fatal(1, &format!("dup2 {}->{}: {}\n", src, target, e));
-        }
-        let _ = close(src);
-    }
-}
-
-pub fn wait_for_process(pid: i32, message: &str) -> i32 {
-    let nix_pid = nix::unistd::Pid::from_raw(pid);
-    match waitpid(nix_pid, Some(WaitPidFlag::empty())) {
-        Ok(WaitStatus::Exited(_, code)) => {
-            if code != 0 {
-                eprintln!("{} process died with code {}\n", message, code);
-                return code;
+/// C's wait_for_process: wait for the coprocess and report how it died.
+///
+/// Returns the process exit code when it exited on its own, 1 when it
+/// was killed by a signal, and 0 when it terminated cleanly (or the
+/// wait itself failed).
+pub fn wait_for_child(child: &mut std::process::Child, message: &str) -> i32 {
+    match child.wait() {
+        Ok(status) => {
+            if let Some(code) = status.code() {
+                if code != 0 {
+                    eprintln!("{} process died with code {}\n", message, code);
+                    return code;
+                }
+            } else if let Some(sig) = status.signal() {
+                eprintln!("{} process caught signal {}\n", message, sig);
+                return 1;
             }
         }
-        Ok(WaitStatus::Signaled(_, sig, _)) => {
-            eprintln!("{} process caught signal {:?}\n", message, sig);
-            return 1;
-        }
-        Ok(_) => {}
         Err(_) => {}
     }
     0

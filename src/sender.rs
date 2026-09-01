@@ -99,11 +99,6 @@ struct Cli {
     #[arg(short = 'S', long = "autostart", default_value = "0")]
     autostart: i32,
 
-    /// Write the process id to FILE while transferring (written when daemon
-    /// mode detaches, removed on exit and on SIGTERM).
-    #[arg(long = "pid-file", value_name = "FILE")]
-    pid_file: Option<String>,
-
     #[arg(short = 'B', long = "broadcast")]
     broadcast: bool,
 
@@ -132,11 +127,6 @@ struct Cli {
         default_value = "200"
     )]
     retries_until_drop: i32,
-
-    /// `-D` restarts after every transfer; `-DD` additionally detaches from the
-    /// terminal and writes `--pid-file` (same two-step semantics as the C one).
-    #[arg(short = 'D', long = "daemon-mode", action = clap::ArgAction::Count)]
-    daemon_mode: u8,
 
     #[arg(short = 'I', long = "bw-period", default_value = "0")]
     bw_period: i64,
@@ -167,47 +157,10 @@ struct Cli {
     #[arg(short = 'L', long = "license")]
     license: bool,
 
-    /// Kill the daemon whose pid is in `--pid-file`, then exit.
-    #[arg(short = 'K', long = "kill")]
-    kill: bool,
-
     #[arg(short = 'A', long = "autorate")]
     autorate: bool,
 
     trailing: Vec<String>,
-}
-
-/// Path of `--pid-file`, for the SIGTERM handler that cleans it up.
-static PID_FILE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-
-fn remove_pidfile() {
-    if let Some(path) = PID_FILE.get() {
-        let _ = std::fs::remove_file(path);
-    }
-}
-
-extern "C" fn clean_pidfile(_sig: i32) {
-    remove_pidfile();
-    // Re-raise with the default disposition, like C's cleanPidfile().
-    unsafe {
-        libc::signal(libc::SIGTERM, libc::SIG_DFL);
-        libc::kill(libc::getpid(), libc::SIGTERM);
-    }
-}
-
-/// `--pid-file`: announce ourselves to init scripts / supervisors.
-fn setup_pidfile(path: &str) {
-    if let Err(e) = std::fs::write(path, format!("{}\n", std::process::id())) {
-        crate::util::fatal(1, &format!("Cannot write pid file {}: {}\n", path, e));
-    }
-    let _ = PID_FILE.set(path.to_string());
-    unsafe {
-        let handler: extern "C" fn(i32) = clean_pidfile;
-        let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = handler as *const () as usize;
-        libc::sigemptyset(&mut sa.sa_mask);
-        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
-    }
 }
 
 /// Parse the `--fec` spec `[stripes]x[redundancy][/stripesize]`.
@@ -411,71 +364,23 @@ pub fn run_sender() {
         crate::util::fatal(1, "pointopoint and nopointopoint cannot be set both\n");
     }
 
-    // -DD: detach from the terminal (like C's daemon(1, 0)) and turn off the
-    // parts that need one: keyboard start and progress output.
-    let mut stat_config = stat_config;
-    if cli.daemon_mode >= 2 {
-        net_config.flags |= crate::senddata::FLAG_NOKBD;
-        stat_config.no_progress = true;
-    }
-
     eprintln!("Udp-sender 1.0.0\n");
 
-    // -D: keep serving transfers until killed; a receiver that joins while a
-    // transfer is running is picked up by the next one.
-    let mut round = 0u32;
-    let mut r;
-    loop {
-        let socks = match negotiate::open_sender_socks(
-            &mut net_config,
-            cli.interface.as_deref(),
-            &disk_config,
-            round == 0,
-        ) {
-            Some(s) => s,
-            None => {
-                eprintln!("Could not open main sender socket");
-                std::process::exit(1);
-            }
-        };
-
-        if round == 0 && cli.daemon_mode >= 2 {
-            daemonize();
-            if let Some(path) = cli.pid_file.as_deref() {
-                setup_pidfile(path);
-            }
+    let socks = match negotiate::open_sender_socks(
+        &mut net_config,
+        cli.interface.as_deref(),
+        &disk_config,
+        true,
+    ) {
+        Some(s) => s,
+        None => {
+            eprintln!("Could not open main sender socket");
+            std::process::exit(1);
         }
+    };
 
-        r = negotiate::start_sender_with_socks(&disk_config, &mut net_config, &stat_config, socks);
-        round += 1;
-        if cli.daemon_mode == 0 || r != 0 {
-            break;
-        }
-    }
-
-    remove_pidfile();
+    let r = negotiate::start_sender_with_socks(&disk_config, &mut net_config, &stat_config, socks);
     std::process::exit(r);
-}
-
-/// `daemon(1, 0)`: leave the controlling terminal, keep the working directory,
-/// point stdin/stdout/stderr at /dev/null. Called before any worker thread is
-/// spawned, so forking here is safe.
-fn daemonize() {
-    unsafe {
-        match libc::fork() {
-            -1 => crate::util::fatal(1, "Could not daemonize (fork)\n"),
-            0 => {}
-            _ => std::process::exit(0),
-        }
-        libc::setsid();
-        if let Ok(f) = std::fs::OpenOptions::new().read(true).write(true).open("/dev/null") {
-            use std::os::unix::io::AsRawFd;
-            let fd = f.as_raw_fd();
-            libc::dup2(fd, 0);
-            libc::dup2(fd, 1);
-            libc::dup2(fd, 2);
-        }
-    }
 }
 
 #[cfg(test)]

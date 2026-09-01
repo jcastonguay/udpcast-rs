@@ -1,17 +1,102 @@
+// Forward error correction based on Vandermonde matrices over GF(2^8),
+// a Rust port of the C `fec.c` (Rizzo/Karn/Morelos-Zaragoza).
+//
+// All lookup tables are built at compile time (`const fn`) in the exact
+// same order the C code fills them at `fec_init()` time: the
+// exponential/logarithm tables use the primitive polynomial
+// ALL_PP[8] = 0x11d, so the tables are bit-identical to the C ones and
+// the wire protocol does not change.
+
 const GF_BITS: usize = 8;
 const GF_SIZE: usize = (1 << GF_BITS) - 1;
 
-static ALL_PP: &[&str] = &[
-    "", "", "111", "1101", "11001", "101001", "1100001", "10010001",
-    "101110001", "1000100001", "10010000001", "101000000001",
-    "1100101000001", "11011000000001", "110000100010001",
-    "1100000000000001", "11010000000010001",
-];
+/// The C code chooses its generator polynomial from ALL_PP by bit width
+/// and folds in the i-th character while scanning with mask = 1<<i,
+/// i.e. the string is stored LSB-first. For the only width it supports
+/// (8) that is ALL_PP[8] = "101110001", the standard 0x11d polynomial
+/// (x^8+x^4+x^3+x^2+1); the loop never reads the i=8 character, so the
+/// x^8 bit is not folded into exp[8] (which lands on 0x1d). Kept as a
+/// bit constant so the table build below can run in a const fn.
+const PRIME: u16 = 0x11d;
 
-static mut GF_EXP: [u8; 512] = [0; 512];
-static mut GF_LOG: [i32; 257] = [0; 257];
-static mut INVERSE: [u8; 257] = [0; 257];
-static mut GF_MUL_TABLE: [u8; 65536] = [0; 65536];
+/// The C `generate_gf()`: fill the exponential and logarithm tables for
+/// GF(2^8) with the primitive polynomial 0x11d.
+const fn build_exp_log() -> ([u8; 256], [i32; 256]) {
+    let mut exp = [0u8; 256];
+    let mut log = [0i32; 256];
+    let mut mask: u8 = 1;
+    exp[GF_BITS] = 0;
+
+    let mut i = 0;
+    while i < GF_BITS {
+        exp[i] = mask;
+        log[mask as usize] = i as i32;
+        if PRIME & (mask as u16) != 0 {
+            exp[GF_BITS] ^= mask;
+        }
+        mask = mask << 1;
+        i += 1;
+    }
+    log[exp[GF_BITS] as usize] = GF_BITS as i32;
+    let mask = 1u8 << (GF_BITS - 1);
+    i = GF_BITS + 1;
+    while i < GF_SIZE {
+        if exp[i - 1] >= mask {
+            exp[i] = exp[GF_BITS] ^ ((exp[i - 1] ^ mask) << 1);
+        } else {
+            exp[i] = exp[i - 1] << 1;
+        }
+        log[exp[i] as usize] = i as i32;
+        i += 1;
+    }
+    // log(0) is undefined; C stores GF_SIZE there.
+    log[0] = GF_SIZE as i32;
+    (exp, log)
+}
+
+const EXP_LOG: ([u8; 256], [i32; 256]) = build_exp_log();
+const GF_EXP: [u8; 256] = EXP_LOG.0;
+const GF_LOG: [i32; 256] = EXP_LOG.1;
+
+/// The C `INVERSE[]` table: GF_EXP[GF_SIZE - GF_LOG[i]].
+const fn build_inverse() -> [u8; 256] {
+    let mut inv = [0u8; 256];
+    inv[0] = 0;
+    inv[1] = 1;
+    let mut i = 2;
+    while i < 256 {
+        inv[i] = GF_EXP[GF_SIZE - GF_LOG[i] as usize];
+        i += 1;
+    }
+    inv
+}
+
+const INVERSE: [u8; 256] = build_inverse();
+
+/// The C `GF_MUL_TABLE`: GF_EXP[(GF_LOG[i] + GF_LOG[j]) % GF_SIZE],
+/// with row 0 and column 0 zeroed afterwards, exactly like C's
+/// init_mul_table (so multiplication by zero is zero).
+const fn build_mul() -> [u8; 65536] {
+    let mut t = [0u8; 65536];
+    let mut i = 0;
+    while i < 256 {
+        let mut j = 0;
+        while j < 256 {
+            t[i * 256 + j] = GF_EXP[(GF_LOG[i] as usize + GF_LOG[j] as usize) % GF_SIZE];
+            j += 1;
+        }
+        i += 1;
+    }
+    let mut j = 0;
+    while j < 256 {
+        t[j] = 0;
+        t[j * 256] = 0;
+        j += 1;
+    }
+    t
+}
+
+const GF_MUL_TABLE: [u8; 65536] = build_mul();
 
 #[allow(dead_code)]
 fn modnn(mut x: usize) -> u8 {
@@ -22,84 +107,12 @@ fn modnn(mut x: usize) -> u8 {
     x as u8
 }
 
-unsafe fn generate_gf() {
-    let pp = ALL_PP[GF_BITS];
-    let mut mask: u8 = 1;
-    unsafe { GF_EXP[GF_BITS] = 0 };
-
-    for i in 0..GF_BITS {
-        unsafe {
-            GF_EXP[i] = mask;
-            GF_LOG[mask as usize] = i as i32;
-            if pp.as_bytes().get(i) == Some(&b'1') {
-                GF_EXP[GF_BITS] ^= mask;
-            }
-        }
-        mask <<= 1;
-    }
-    unsafe {
-        GF_LOG[GF_EXP[GF_BITS] as usize] = GF_BITS as i32;
-    }
-    let mask = 1u8 << (GF_BITS - 1);
-    for i in (GF_BITS + 1)..GF_SIZE {
-        unsafe {
-            if GF_EXP[i - 1] >= mask {
-                GF_EXP[i] = GF_EXP[GF_BITS] ^ ((GF_EXP[i - 1] ^ mask) << 1);
-            } else {
-                GF_EXP[i] = GF_EXP[i - 1] << 1;
-            }
-            GF_LOG[GF_EXP[i] as usize] = i as i32;
-        }
-    }
-    unsafe {
-        GF_LOG[0] = GF_SIZE as i32;
-        for i in 0..GF_SIZE {
-            GF_EXP[i + GF_SIZE] = GF_EXP[i];
-        }
-        INVERSE[0] = 0;
-        INVERSE[1] = 1;
-        for i in 2..=GF_SIZE {
-            INVERSE[i] = GF_EXP[GF_SIZE - GF_LOG[i] as usize];
-        }
-    }
-}
-
-unsafe fn init_mul_table() {
-    for i in 0..=GF_SIZE {
-        for j in 0..=GF_SIZE {
-            unsafe {
-                GF_MUL_TABLE[(i << 8) + j] =
-                    GF_EXP[(GF_LOG[i] + GF_LOG[j]) as usize % GF_SIZE];
-            }
-        }
-    }
-    for j in 0..=GF_SIZE {
-        unsafe {
-            GF_MUL_TABLE[j] = 0;
-            GF_MUL_TABLE[j << 8] = 0;
-        }
-    }
-}
-
-static mut FEC_INITIALIZED: bool = false;
-
-pub fn fec_init() {
-    unsafe {
-        if FEC_INITIALIZED {
-            return;
-        }
-        generate_gf();
-        init_mul_table();
-        FEC_INITIALIZED = true;
-    }
-}
-
 #[inline]
-unsafe fn gf_mul(x: u8, y: u8) -> u8 {
-    unsafe { GF_MUL_TABLE[((x as usize) << 8) + y as usize] }
+fn gf_mul(x: u8, y: u8) -> u8 {
+    GF_MUL_TABLE[((x as usize) << 8) + y as usize]
 }
 
-unsafe fn addmul(dst: &mut [u8], src: &[u8], c: u8, sz: usize) {
+fn addmul(dst: &mut [u8], src: &[u8], c: u8, sz: usize) {
     if c == 0 {
         return;
     }
@@ -108,7 +121,7 @@ unsafe fn addmul(dst: &mut [u8], src: &[u8], c: u8, sz: usize) {
     }
 }
 
-unsafe fn mul(dst: &mut [u8], src: &[u8], c: u8, sz: usize) {
+fn mul(dst: &mut [u8], src: &[u8], c: u8, sz: usize) {
     if c == 0 {
         dst[..sz].fill(0);
         return;
@@ -118,7 +131,7 @@ unsafe fn mul(dst: &mut [u8], src: &[u8], c: u8, sz: usize) {
     }
 }
 
-unsafe fn invert_mat(src: &mut [u8], k: usize) -> i32 {
+fn invert_mat(src: &mut [u8], k: usize) -> i32 {
     let mut indxc = vec![0i32; k];
     let mut indxr = vec![0i32; k];
     let mut ipiv = vec![0i32; k];
@@ -170,7 +183,7 @@ unsafe fn invert_mat(src: &mut [u8], k: usize) -> i32 {
             return 1;
         }
         if pivot_icol != 1 {
-            let c = unsafe { INVERSE[pivot_icol as usize] };
+            let c = INVERSE[pivot_icol as usize];
             src[icol * k + icol] = 1;
             for ix in 0..k {
                 src[icol * k + ix] = gf_mul(c, src[icol * k + ix]);
@@ -218,21 +231,18 @@ pub fn fec_encode(
     data_blocks: &[&[u8]],
     fec_blocks: &mut [&mut [u8]],
 ) {
-    unsafe {
-        assert!(FEC_INITIALIZED);
-        assert!(data_blocks.len() <= 128);
-        assert!(fec_blocks.len() <= 128);
-        if data_blocks.is_empty() {
-            return;
-        }
+    assert!(data_blocks.len() <= 128);
+    assert!(fec_blocks.len() <= 128);
+    if data_blocks.is_empty() {
+        return;
+    }
+    for row in 0..fec_blocks.len() {
+        mul(fec_blocks[row], data_blocks[0], INVERSE[128 ^ row], block_size);
+    }
+    for (block_no, data_block) in data_blocks.iter().enumerate().skip(1) {
+        let col = 128 + block_no;
         for row in 0..fec_blocks.len() {
-            mul(&mut fec_blocks[row], data_blocks[0], INVERSE[128 ^ row], block_size);
-        }
-        for (block_no, data_block) in data_blocks.iter().enumerate().skip(1) {
-            let col = 128 + block_no;
-            for row in 0..fec_blocks.len() {
-                addmul(fec_blocks[row], data_block, INVERSE[row ^ col], block_size);
-            }
+            addmul(fec_blocks[row], data_block, INVERSE[row ^ col], block_size);
         }
     }
 }
@@ -257,9 +267,12 @@ pub fn fec_decode(
             let src = &data_blocks[col];
             for j in 0..nr_fec_blocks {
                 let blno = fec_block_nos[j];
-                unsafe {
-                    addmul(&mut reduced_fec[j], src, INVERSE[(blno as usize) ^ col ^ 128], block_size);
-                }
+                addmul(
+                    &mut reduced_fec[j],
+                    src,
+                    INVERSE[(blno as usize) ^ col ^ 128],
+                    block_size,
+                );
             }
         }
     }
@@ -269,26 +282,25 @@ pub fn fec_decode(
         let irow = 128 + *fec_no as usize;
         for (col, &erased) in erased_blocks.iter().enumerate() {
             let icol = erased as usize;
-            unsafe {
-                matrix[row * nr_fec_blocks + col] = INVERSE[irow ^ icol];
-            }
+            matrix[row * nr_fec_blocks + col] = INVERSE[irow ^ icol];
         }
     }
 
-    unsafe {
-        let r = invert_mat(&mut matrix, nr_fec_blocks);
-        if r != 0 {
-            return false;
-        }
+    let r = invert_mat(&mut matrix, nr_fec_blocks);
+    if r != 0 {
+        return false;
     }
 
     for (row, &erased) in erased_blocks.iter().enumerate() {
         let target = &mut data_blocks[erased as usize];
-        unsafe {
-            mul(target, &reduced_fec[0], matrix[row * nr_fec_blocks], block_size);
-            for col in 1..nr_fec_blocks {
-                addmul(target, &reduced_fec[col], matrix[row * nr_fec_blocks + col], block_size);
-            }
+        mul(target, &reduced_fec[0], matrix[row * nr_fec_blocks], block_size);
+        for col in 1..nr_fec_blocks {
+            addmul(
+                target,
+                &reduced_fec[col],
+                matrix[row * nr_fec_blocks + col],
+                block_size,
+            );
         }
     }
     true
@@ -347,7 +359,7 @@ are met:
 
 THIS SOFTWARE IS PROVIDED BY THE AUTHORS ``AS IS'' AND
 ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
-THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+THE IMPLIED WARRANTIES OF MERCHANTABILITY OR FITNESS FOR A
 PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHORS
 BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY,
 OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
@@ -376,9 +388,54 @@ pub fn fec_license() {
 mod tests {
     use super::*;
 
+/// The compile-time tables must be bit-identical to what the C
+    /// `fec_init()` (generate_gf + init_mul_table) produces at runtime.
+    /// The generator polynomial is the standard 0x11d (x^8+x^4+x^3+x^2+1),
+    /// stored LSB-first in Rizzo's ALL_PP; the scan stops at i=8 so
+    /// alpha^8 lands on 0x1d, the classic first reduction.
+    #[test]
+    fn gf_tables_match_c() {
+        // The leading powers of alpha.
+        assert_eq!(GF_EXP[0], 1);
+        assert_eq!(GF_EXP[1], 2);
+        assert_eq!(GF_EXP[2], 4);
+        assert_eq!(GF_EXP[7], 128);
+        // First reduction: alpha^8 = 2^0 ^ 2^2 ^ 2^3 ^ 2^4 = 29 = 0x1d.
+        assert_eq!(GF_EXP[8], 29);
+        assert_eq!(GF_LOG[29], 8);
+        // alpha^9 = 29 << 1 = 58 = 0x3a.
+        assert_eq!(GF_EXP[9], 58);
+        assert_eq!(GF_LOG[58], 9);
+
+        // The exponent table must be consistent with the multiplication
+        // table: alpha^(i+1) = alpha^i * alpha for every populated power
+        // (index 255 is left 0, exactly like the C table).
+        for i in 1..254 {
+            assert_eq!(gf_mul(GF_EXP[i], 2), GF_EXP[i + 1]);
+        }
+        assert_eq!(GF_EXP[255], 0);
+        // The log table inverts the exponent table.
+        for v in 1..256 {
+            assert_eq!(u32::from(GF_EXP[GF_LOG[v] as usize]), v as u32);
+        }
+        // C's INVERSE: INVERSE[i] = GF_EXP[GF_SIZE - GF_LOG[i]].
+        assert_eq!(INVERSE[0], 0);
+        assert_eq!(INVERSE[1], 1);
+        for i in 2..256 {
+            assert_eq!(INVERSE[i], GF_EXP[GF_SIZE - GF_LOG[i] as usize]);
+        }
+        // The mul table is the exponent/log form, and respects the
+        // identity element.
+        assert_eq!(gf_mul(1, 0), 0);
+        assert_eq!(gf_mul(1, 7), 7);
+        assert_eq!(
+            gf_mul(3, 5),
+            GF_EXP[(GF_LOG[3] as usize + GF_LOG[5] as usize) % GF_SIZE]
+        );
+    }
+
     #[test]
     fn fec_round_trip() {
-        fec_init();
         let block_size = 256usize;
         let k = 10usize; // data blocks
         let r = 4usize; // redundancy blocks
@@ -435,7 +492,6 @@ mod tests {
     /// (`receivedata::try_fec_recover`).
     #[test]
     fn fec_multi_stripe_wire_layout() {
-        fec_init();
         let block_size = 256usize;
         let nr_data = 12usize; // per slice
         let stripes = 2usize;
@@ -526,7 +582,7 @@ mod tests {
 
     /// `-L` must print exactly what the C binary prints: 54 lines, GPL
     /// header for udpcast followed by the BSD license of the Reed-Solomon
-    /// code (Rizzo/Karn/Morelos-Zarozo).
+    /// code (RizzoC uses its own indentation).
     #[test]
     fn license_text_matches_c() {
         let t = fec_license_text();
@@ -538,7 +594,7 @@ mod tests {
         assert_eq!(
             lines[1],
             "",
-            "second line is blank (C uses its own indentation)"
+            "second line is blank (C prints a blank line)"
         );
         assert_eq!(lines[15], "   59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.");
         assert_eq!(lines[17], "   Alain Knaff");

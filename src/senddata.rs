@@ -1,5 +1,5 @@
 use std::net::{SocketAddrV4, UdpSocket};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use crate::participants::ParticipantsDb;
@@ -60,6 +60,7 @@ impl Slice {
     }
 }
 
+#[derive(Clone)]
 pub struct NetConfig {
     pub net_if: Option<socklib::NetIf>,
     pub port_base: u16,
@@ -157,9 +158,8 @@ enum IncomingMsg {
 }
 
 struct ReturnChannel {
-    incoming: Arc<Produconsum>,
-    free_space: Arc<Produconsum>,
-    messages: Vec<std::cell::UnsafeCell<IncomingMsg>>,
+    msgs: Arc<std::sync::Mutex<std::collections::VecDeque<IncomingMsg>>>,
+    wake: Arc<std::sync::Condvar>,
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
     /// Diagnostics: packets read from the socket, messages enqueued and
@@ -169,21 +169,11 @@ struct ReturnChannel {
     popped: Arc<AtomicU64>,
 }
 
-unsafe impl Send for ReturnChannel {}
-unsafe impl Sync for ReturnChannel {}
-
 impl ReturnChannel {
     fn new() -> Self {
-        let incoming = Arc::new(Produconsum::new(QUEUE_SIZE, "rc:incoming"));
-        let free_space = Arc::new(Produconsum::new(QUEUE_SIZE, "rc:free"));
-        free_space.produce(QUEUE_SIZE);
-        let messages = (0..QUEUE_SIZE)
-            .map(|_| std::cell::UnsafeCell::new(IncomingMsg::Ok { slice_no: 0, cl_no: 0 }))
-            .collect();
         Self {
-            incoming,
-            free_space,
-            messages,
+            msgs: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::with_capacity(QUEUE_SIZE))),
+            wake: Arc::new(std::sync::Condvar::new()),
             stop: Arc::new(AtomicBool::new(false)),
             handle: None,
             rx: Arc::new(AtomicU64::new(0)),
@@ -192,156 +182,158 @@ impl ReturnChannel {
         }
     }
 
-    /// Reads answers from every socket the sender listens on. Receivers unicast
-    /// their OK/retransmit messages to the sender's port, but depending on how
-    /// the sockets are bound the kernel may hand such a datagram to any of them,
-    /// so all of them have to be polled (C gets this for free because it does not
-    /// set SO_REUSEPORT; we simply read from all sockets to be safe).
+    /// Reads answers from every socket the sender listens on. Receivers
+    /// unicast their OK/retransmit messages to the sender's port, but
+    /// depending on how the sockets are bound the kernel may hand such a
+    /// datagram to any of them, so all of them have to be polled (C gets
+    /// this for free because it does not set SO_REUSEPORT; we simply read
+    /// from all sockets to be safe).
     fn start(
         &mut self,
         socks: Vec<UdpSocket>,
         port_base: u16,
         db: Arc<std::sync::Mutex<ParticipantsDb>>,
     ) {
-        let incoming = self.incoming.clone();
-        let free_space = self.free_space.clone();
+        let msgs = self.msgs.clone();
+        let wake = self.wake.clone();
         let stop = self.stop.clone();
         let rx = self.rx.clone();
         let enq = self.enq.clone();
-        let msgs = &self.messages as *const Vec<std::cell::UnsafeCell<IncomingMsg>> as usize;
 
         let handle = std::thread::spawn(move || {
-            use nix::sys::select::{select, FdSet};
-            use std::os::unix::io::{AsRawFd, BorrowedFd};
+            use nix::poll::{poll, PollFd, PollFlags};
+            use std::os::unix::io::AsFd;
 
-            let msgs = unsafe { &*(msgs as *const Vec<std::cell::UnsafeCell<IncomingMsg>>) };
             for s in socks.iter() {
                 s.set_read_timeout(Some(Duration::from_millis(200))).ok();
             }
-            // Sockets reported readable by the last select; they may still hold
-            // queued datagrams.
-            let mut ready: Vec<i32> = Vec::new();
             let mut buf = [0u8; 512];
             loop {
                 if stop.load(Ordering::Relaxed) {
                     break;
                 }
 
-                let fd = match ready.pop() {
-                    Some(fd) => fd,
-                    None => {
-                        let mut read_set = FdSet::new();
-                        let mut max_fd = 0i32;
-                        for s in socks.iter() {
-                            let fd = s.as_raw_fd();
-                            read_set.insert(unsafe { BorrowedFd::borrow_raw(fd) });
-                            if fd >= max_fd {
-                                max_fd = fd + 1;
-                            }
-                        }
-                        if max_fd == 0 {
-                            break;
-                        }
-                        let mut tv = nix::sys::time::TimeVal::new(0, 200_000_000);
-                        match select(max_fd, Some(&mut read_set), None, None, Some(&mut tv)) {
-                            Ok(0) => continue,
-                            Ok(_) => {
-                                for s in socks.iter() {
-                                    let fd = s.as_raw_fd();
-                                    if read_set.contains(unsafe { BorrowedFd::borrow_raw(fd) }) {
-                                        ready.push(fd);
-                                    }
-                                }
-                            }
-                            Err(nix::errno::Errno::EINTR) => continue,
-                            Err(_) => continue,
-                        }
+                let mut pfds: Vec<PollFd> = socks
+                    .iter()
+                    .map(|s| PollFd::new(s.as_fd(), PollFlags::POLLIN))
+                    .collect();
+                match poll(&mut pfds, 200u16) {
+                    Ok(0) => continue,
+                    Ok(_) => {}
+                    Err(nix::errno::Errno::EINTR) => continue,
+                    Err(_) => continue,
+                }
+
+                for (s, pfd) in socks.iter().zip(pfds.iter()) {
+                    if pfd.revents().is_none() {
                         continue;
                     }
-                };
+                    // Drain every datagram queued on this socket.
+                    loop {
+                        let (n, from) = match s.recv_from(&mut buf) {
+                            Ok(r) => r,
+                            // Drained (or the read timeout fired): go on.
+                            Err(_) => break,
+                        };
+                        if n < 4 {
+                            continue;
+                        }
+                        rx.fetch_add(1, Ordering::Relaxed);
+                        let from_v4 = match from {
+                            std::net::SocketAddr::V4(v4) => v4,
+                            _ => continue,
+                        };
+                        if from_v4.port() != socklib::RECEIVER_PORT(port_base) {
+                            continue;
+                        }
 
-                let Some(sock) = socks.iter().find(|s| s.as_raw_fd() == fd) else {
-                    continue;
-                };
-                let (n, from) = match sock.recv_from(&mut buf) {
-                    Ok(r) => r,
-                    // Drained (or interrupted): go back to select().
-                    Err(_) => continue,
-                };
-                // There may be more datagrams waiting on this very socket.
-                ready.push(fd);
+                        let cl_no = {
+                            let db_l = db.lock().unwrap();
+                            db_l.lookup_participant(&from_v4)
+                        };
+                        if cl_no < 0 {
+                            continue;
+                        }
 
-                if n < 4 {
-                    continue;
-                }
-                rx.fetch_add(1, Ordering::Relaxed);
-                let from_v4 = match from {
-                    std::net::SocketAddr::V4(v4) => v4,
-                    _ => continue,
-                };
-                if from_v4.port() != socklib::RECEIVER_PORT(port_base) {
-                    continue;
-                }
+                        let opcode = u16::from_be_bytes([buf[0], buf[1]]);
+                        let msg = match opcode {
+                            protocol::CMD_OK => {
+                                if n < protocol::OK_MSG_SIZE { continue; }
+                                let ok = protocol::OkMsg::unpack(&buf);
+                                IncomingMsg::Ok { slice_no: ok.slice_no, cl_no }
+                            }
+                            protocol::CMD_RETRANSMIT => {
+                                if n < protocol::RETRANSMIT_SIZE { continue; }
+                                let rt = protocol::Retransmit::unpack(&buf);
+                                IncomingMsg::Retransmit { slice_no: rt.slice_no, cl_no, map: rt.map, rxmit: rt.rxmit }
+                            }
+                            protocol::CMD_DISCONNECT => {
+                                IncomingMsg::Disconnect { cl_no }
+                            }
+                            _ => continue,
+                        };
 
-                let db = db.lock().unwrap();
-                let cl_no = db.lookup_participant(&from_v4);
-                if cl_no < 0 {
-                    continue;
-                }
-                drop(db);
-
-                let opcode = u16::from_be_bytes([buf[0], buf[1]]);
-                let msg = match opcode {
-                    protocol::CMD_OK => {
-                        if n < protocol::OK_MSG_SIZE { continue; }
-                        let ok = protocol::OkMsg::unpack(&buf);
-                        IncomingMsg::Ok { slice_no: ok.slice_no, cl_no }
+                        // Bounded queue: block (C's free-space semaphore)
+                        // until the dispatcher makes room or we stop.
+                        let mut g = msgs.lock().unwrap();
+                        loop {
+                            if g.len() < QUEUE_SIZE || stop.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            // The poison error carries the guard back.
+                            g = match wake.wait_timeout(g, Duration::from_millis(200)) {
+                                Ok((g2, _)) => g2,
+                                Err(p) => p.into_inner().0,
+                            };
+                        }
+                        if stop.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        g.push_back(msg);
+                        wake.notify_one();
+                        enq.fetch_add(1, Ordering::Relaxed);
                     }
-                    protocol::CMD_RETRANSMIT => {
-                        if n < protocol::RETRANSMIT_SIZE { continue; }
-                        let rt = protocol::Retransmit::unpack(&buf);
-                        IncomingMsg::Retransmit { slice_no: rt.slice_no, cl_no, map: rt.map, rxmit: rt.rxmit }
-                    }
-                    protocol::CMD_DISCONNECT => {
-                        IncomingMsg::Disconnect { cl_no }
-                    }
-                    _ => continue,
-                };
-
-                free_space.consume(1);
-                let pos = free_space.get_consumer_position();
-                unsafe { *msgs[pos].get() = msg; }
-                free_space.consumed(1);
-                enq.fetch_add(1, Ordering::Relaxed);
-                incoming.produce(1);
+                }
             }
         });
         self.handle = Some(handle);
     }
 
     fn get_waiting(&self) -> usize {
-        self.incoming.get_waiting()
+        self.msgs.lock().unwrap().len()
     }
 
     fn pop(&self) -> Option<IncomingMsg> {
-        if self.incoming.get_waiting() == 0 {
-            return None;
+        let mut q = self.msgs.lock().unwrap();
+        let msg = q.pop_front();
+        if msg.is_some() {
+            self.popped.fetch_add(1, Ordering::Relaxed);
+            self.wake.notify_one();
         }
-        self.incoming.consume(1);
-        let pos = self.incoming.get_consumer_position();
-        let msg = unsafe { std::ptr::read(self.messages[pos].get()) };
-        self.incoming.consumed(1);
-        self.free_space.produce(1);
-        self.popped.fetch_add(1, Ordering::Relaxed);
-        Some(msg)
+        msg
     }
 
     fn consume_with_timeout(&self, timeout: Duration) -> bool {
-        self.incoming.consume_any_with_timeout(timeout) > 0
+        let deadline = std::time::Instant::now() + timeout;
+        let mut g = self.msgs.lock().unwrap();
+        loop {
+            if !g.is_empty() {
+                return true;
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            g = match self.wake.wait_timeout(g, deadline - now) {
+                Ok((g2, _)) => g2,
+                Err(_) => return false,
+            };
+        }
     }
 
     fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
+        self.wake.notify_all();
     }
 
     fn join(&mut self) {
@@ -365,7 +357,7 @@ fn set_bit(bitmap: &mut [u8], bit: usize) {
 pub fn spawn_net_sender(
     data: &Produconsum,
     free_mem_queue: &Produconsum,
-    data_buffer: &[u8],
+    data_buffer: &Mutex<Vec<u8>>,
     data_buf_size: usize,
     sock: &UdpSocket,
     extra_socks: &[UdpSocket],
@@ -379,9 +371,7 @@ pub fn spawn_net_sender(
         0
     };
 
-    if net_config.flags & FLAG_FEC != 0 {
-        crate::fec::fec_init();
-    }
+    // The FEC tables are built at compile time; nothing to initialize.
 
     let mut slices: Vec<Slice> = (0..NR_SLICES).map(|_| Slice::new(fec_buf_size)).collect();
 
@@ -426,11 +416,6 @@ pub fn spawn_net_sender(
     if net_config.autorate {
         rate_set.add_autorate();
     }
-    let sock_fd = {
-        use std::os::unix::io::AsRawFd;
-        sock.as_raw_fd()
-    };
-
     if net_config.default_slice_size == 0 {
         if net_config.flags & FLAG_FEC != 0 {
             net_config.slice_size = net_config.fec_stripesize * net_config.fec_stripes;
@@ -514,7 +499,6 @@ pub fn spawn_net_sender(
                         sock,
                         stats,
                         &mut rate_set,
-                        sock_fd,
                     );
                     retransmitted = true;
                 }
@@ -603,10 +587,9 @@ pub fn spawn_net_sender(
                     net_config,
                     sock,
                     &mut rate_set,
-                    sock_fd,
                 );
                 if net_config.flags & FLAG_FEC != 0 && slices[idx].bytes > 0 {
-                    send_fec_blocks(&slices[idx], net_config, sock, &mut rate_set, sock_fd);
+                    send_fec_blocks(&slices[idx], net_config, sock, &mut rate_set);
                 }
                 slices[idx].state = SliceState::Xmitted;
                 send_reqack(&mut slices[idx], net_config, free_mem_queue, stats, sock);
@@ -848,93 +831,85 @@ fn send_batch(
     packets: &[Vec<u8>],
     dest: &SocketAddrV4,
     rate_set: &mut crate::rate::RateGovernorSet,
-    fd: i32,
 ) {
+    use nix::sys::socket::{ControlMessage, MultiHeaders, MsgFlags, SockaddrIn, sendmmsg};
+    use std::io::IoSlice;
+    use std::os::unix::io::AsRawFd;
+
     if packets.is_empty() {
         return;
     }
     let ip = u32::from(*dest.ip());
 
-    let sockaddr = libc::sockaddr_in {
-        sin_family: libc::AF_INET as libc::sa_family_t,
-        sin_port: dest.port().to_be(),
-        sin_addr: libc::in_addr {
-            s_addr: u32::from(*dest.ip()).to_be(),
-        },
-        sin_zero: [0; 8],
-    };
-    let mut iovs: Vec<libc::iovec> = packets
-        .iter()
-        .map(|p| libc::iovec {
-            iov_base: p.as_ptr() as *mut libc::c_void,
-            iov_len: p.len(),
-        })
-        .collect();
-    let mut hdrs: Vec<libc::mmsghdr> = iovs
-        .iter_mut()
-        .map(|iov| libc::mmsghdr {
-            msg_hdr: libc::msghdr {
-                msg_name: &sockaddr as *const _ as *mut libc::c_void,
-                msg_namelen: std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
-                msg_iov: iov,
-                msg_iovlen: 1,
-                msg_control: std::ptr::null_mut(),
-                msg_controllen: 0,
-                msg_flags: 0,
-            },
-            msg_len: 0,
-        })
-        .collect();
+    let sockaddr = SockaddrIn::from(*dest);
+    let fd = sock.as_raw_fd();
 
     let mut offset = 0usize;
-    while offset < hdrs.len() {
-        let chunk = std::cmp::min(1024, hdrs.len() - offset);
+    while offset < packets.len() {
+        let chunk = std::cmp::min(1024, packets.len() - offset);
         for p in &packets[offset..offset + chunk] {
-            rate_set.wait_all(fd, ip, p.len() as i64);
+            rate_set.wait_all(sock, ip, p.len() as i64);
         }
-        let n = unsafe {
-            libc::sendmmsg(fd, hdrs.as_mut_ptr().add(offset), chunk as libc::c_uint, 0)
+
+        // One IoSlice array per datagram (each datagram is a single buffer).
+        let iovs: Vec<[IoSlice<'_>; 1]> = packets[offset..offset + chunk]
+            .iter()
+            .map(|p| [IoSlice::new(p.as_slice())])
+            .collect();
+        let addrs: Vec<Option<SockaddrIn>> = (0..chunk).map(|_| Some(sockaddr)).collect();
+        let cmsgs: [ControlMessage<'_>; 0] = [];
+        let mut hdrs = MultiHeaders::<SockaddrIn>::preallocate(chunk, None);
+
+        let n = match sendmmsg(fd, &mut hdrs, iovs.iter(), &addrs, &cmsgs, MsgFlags::empty()) {
+            Ok(results) => results.into_iter().count(),
+            Err(_) => 0,
         };
-        if n <= 0 {
+        if n == 0 {
             for p in &packets[offset..] {
                 let _ = sock.send_to(p, dest);
             }
             return;
         }
-        offset += n as usize;
+        offset += n;
     }
 }
 
 fn send_slice(
     slice: &Slice,
-    data_buffer: &[u8],
+    data_buffer: &Mutex<Vec<u8>>,
     data_buf_size: usize,
     net_config: &NetConfig,
     sock: &UdpSocket,
     rate_set: &mut crate::rate::RateGovernorSet,
-    fd: i32,
 ) {
     let nr_blocks = (slice.bytes + net_config.block_size as usize - 1) / net_config.block_size as usize;
-    let mut packets: Vec<Vec<u8>> = Vec::with_capacity(nr_blocks);
-    for i in 0..nr_blocks {
-        let size = if i * net_config.block_size as usize >= slice.bytes {
-            0
-        } else {
-            std::cmp::min(net_config.block_size as usize, slice.bytes - i * net_config.block_size as usize)
-        };
-        let msg = protocol::DataBlock {
-            slice_no: slice.slice_no,
-            block_no: i as u16,
-            bytes: slice.bytes as i32,
-        };
-        let header = msg.pack();
-        let data_start = (slice.base + i * net_config.block_size as usize) % data_buf_size;
-        let mut packet = Vec::with_capacity(header.len() + size);
-        packet.extend_from_slice(&header);
-        append_ring(&mut packet, data_buffer, data_buf_size, data_start, size);
-        packets.push(packet);
-    }
-    send_batch(sock, &packets, &net_config.data_mcast_addr, rate_set, fd);
+    // The ring lock is held only while the packets are being copied out;
+    // the network I/O below runs without it, so the local reader can keep
+    // filling the (disjoint) free part of the ring in parallel.
+    let packets: Vec<Vec<u8>> = {
+        let ring = data_buffer.lock().unwrap();
+        let mut packets: Vec<Vec<u8>> = Vec::with_capacity(nr_blocks);
+        for i in 0..nr_blocks {
+            let size = if i * net_config.block_size as usize >= slice.bytes {
+                0
+            } else {
+                std::cmp::min(net_config.block_size as usize, slice.bytes - i * net_config.block_size as usize)
+            };
+            let msg = protocol::DataBlock {
+                slice_no: slice.slice_no,
+                block_no: i as u16,
+                bytes: slice.bytes as i32,
+            };
+            let header = msg.pack();
+            let data_start = (slice.base + i * net_config.block_size as usize) % data_buf_size;
+            let mut packet = Vec::with_capacity(header.len() + size);
+            packet.extend_from_slice(&header);
+            append_ring(&mut packet, &ring, data_buf_size, data_start, size);
+            packets.push(packet);
+        }
+        packets
+    };
+    send_batch(sock, &packets, &net_config.data_mcast_addr, rate_set);
 }
 
 fn send_fec_blocks(
@@ -942,7 +917,6 @@ fn send_fec_blocks(
     net_config: &NetConfig,
     sock: &UdpSocket,
     rate_set: &mut crate::rate::RateGovernorSet,
-    fd: i32,
 ) {
     let nr_fec = (net_config.fec_redundancy * net_config.fec_stripes) as usize;
     let mut packets: Vec<Vec<u8>> = Vec::with_capacity(nr_fec);
@@ -964,10 +938,11 @@ fn send_fec_blocks(
         }
         packets.push(packet);
     }
-    send_batch(sock, &packets, &net_config.data_mcast_addr, rate_set, fd);
+    send_batch(sock, &packets, &net_config.data_mcast_addr, rate_set);
 }
 
-fn fec_encode_slice(slice: &mut Slice, data_buffer: &[u8], data_buf_size: usize, net_config: &NetConfig) {
+fn fec_encode_slice(slice: &mut Slice, data_buffer: &Mutex<Vec<u8>>, data_buf_size: usize, net_config: &NetConfig) {
+    let ring = data_buffer.lock().unwrap();
     let block_size = net_config.block_size as usize;
     let stripes = net_config.fec_stripes as usize;
     let redundancy = net_config.fec_redundancy as usize;
@@ -978,7 +953,7 @@ fn fec_encode_slice(slice: &mut Slice, data_buffer: &[u8], data_buf_size: usize,
     if left_over > 0 && nr_blocks > 0 {
         let last_start = (slice.base + (nr_blocks - 1) * block_size) % data_buf_size;
         for i in 0..left_over {
-            last_block_data[i] = data_buffer[(last_start + i) % data_buf_size];
+            last_block_data[i] = ring[(last_start + i) % data_buf_size];
         }
     }
 
@@ -993,9 +968,9 @@ fn fec_encode_slice(slice: &mut Slice, data_buffer: &[u8], data_buf_size: usize,
             } else {
                 let mut block = vec![0u8; block_size];
                 let first = std::cmp::min(block_size, data_buf_size - start);
-                block[..first].copy_from_slice(&data_buffer[start..start + first]);
+                block[..first].copy_from_slice(&ring[start..start + first]);
                 if first < block_size {
-                    block[first..].copy_from_slice(&data_buffer[..block_size - first]);
+                    block[first..].copy_from_slice(&ring[..block_size - first]);
                 }
                 temp_blocks.push(block);
             }
@@ -1013,13 +988,17 @@ fn fec_encode_slice(slice: &mut Slice, data_buffer: &[u8], data_buf_size: usize,
             .collect();
 
         if !data_ptrs.is_empty() && !fec_offsets.is_empty() {
-            let fec_data_ptr = slice.fec_data.as_mut_ptr();
+            // The parity regions are disjoint sub-slices of fec_data; split
+            // the one &mut borrow into exactly those regions.
             let mut fec_ptrs: Vec<&mut [u8]> = Vec::new();
+            let mut pos = 0;
+            let mut rest: &mut [u8] = &mut slice.fec_data;
             for &(offset, end) in &fec_offsets {
-                let ptr = unsafe { fec_data_ptr.add(offset) };
-                let len = end - offset;
-                let slice_ref = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
-                fec_ptrs.push(slice_ref);
+                let (before, after) = rest.split_at_mut(end - pos);
+                let (_gap, region) = before.split_at_mut(offset - pos);
+                fec_ptrs.push(region);
+                pos = end;
+                rest = after;
             }
             crate::fec::fec_encode(block_size, &data_ptrs, &mut fec_ptrs);
         }
@@ -1028,17 +1007,18 @@ fn fec_encode_slice(slice: &mut Slice, data_buffer: &[u8], data_buf_size: usize,
 
 fn rexmit_slice(
     slice: &mut Slice,
-    data_buffer: &[u8],
+    data_buffer: &Mutex<Vec<u8>>,
     data_buf_size: usize,
     net_config: &NetConfig,
     sock: &UdpSocket,
     stats: &mut SenderStats,
     rate_set: &mut crate::rate::RateGovernorSet,
-    fd: i32,
 ) {
     let nr_blocks = (slice.bytes + net_config.block_size as usize - 1) / net_config.block_size as usize;
     let mut retransmissions = 0u32;
     let mut packets: Vec<Vec<u8>> = Vec::new();
+
+    let ring = data_buffer.lock().unwrap();
 
     for i in 0..nr_blocks {
         if !bit_is_set(&slice.rxmit_map, i) || bit_is_set(&slice.is_xmitted_map, i) {
@@ -1064,7 +1044,7 @@ fn rexmit_slice(
         let data_start = (slice.base + i * net_config.block_size as usize) % data_buf_size;
         let mut packet = Vec::with_capacity(header.len() + size);
         packet.extend_from_slice(&header);
-        append_ring(&mut packet, data_buffer, data_buf_size, data_start, size);
+        append_ring(&mut packet, &ring, data_buf_size, data_start, size);
         // Send the block twice in the same round.  C retransmits a missing
         // block once per (typically one second) round; at 30%+ path loss a
         // one-block tail then needs many rounds to clear, and a receiver
@@ -1081,7 +1061,7 @@ fn rexmit_slice(
 
     if retransmissions > 0 {
         stats.add_retransmissions(retransmissions);
-        send_batch(sock, &packets, &net_config.data_mcast_addr, rate_set, fd);
+        send_batch(sock, &packets, &net_config.data_mcast_addr, rate_set);
     }
     slice.need_rxmit = false;
 }

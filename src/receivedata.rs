@@ -1,4 +1,5 @@
 use std::net::{SocketAddrV4, UdpSocket};
+use std::os::unix::io::{AsFd, AsRawFd};
 use std::time::{Duration, Instant};
 use crate::fifo::Fifo;
 use crate::protocol;
@@ -266,8 +267,9 @@ fn is_sender_packet(from: &std::net::SocketAddr, port_base: u16) -> bool {
 /// one by one, so a burst of incoming data costs one select plus one recvfrom
 /// per packet instead of a probe on every socket for every packet.
 struct RxPoller {
-    /// Raw fds reported readable by the last select; the tail is drained first.
-    ready: Vec<i32>,
+    /// Socket indices reported readable by the last select; the tail is
+    /// drained first.
+    ready: Vec<usize>,
 }
 
 impl RxPoller {
@@ -282,17 +284,18 @@ impl RxPoller {
         port_base: u16,
     ) -> Option<(usize, std::net::SocketAddr)> {
         use nix::sys::select::{select, FdSet};
-        use std::os::unix::io::{AsRawFd, BorrowedFd};
 
         loop {
-            while let Some(fd) = self.ready.pop() {
-                let sock = socks.iter_mut().flatten().find(|s| s.as_raw_fd() == fd);
-                let Some(sock) = sock else { continue };
+            while let Some(i) = self.ready.pop() {
+                if i >= socks.len() {
+                    continue;
+                }
+                let Some(sock) = &mut socks[i] else { continue };
                 match sock.recv_from(buf) {
                     Ok((n, from)) => {
                         if is_sender_packet(&from, port_base) {
                             // More data may still be queued here.
-                            self.ready.push(fd);
+                            self.ready.push(i);
                             return Some((n, from));
                         }
                     }
@@ -303,11 +306,14 @@ impl RxPoller {
 
             let mut read_set = FdSet::new();
             let mut max_fd = 0i32;
-            for sock in socks.iter().flatten() {
-                let fd = sock.as_raw_fd();
-                read_set.insert(unsafe { BorrowedFd::borrow_raw(fd) });
-                if fd >= max_fd {
-                    max_fd = fd + 1;
+            for (_i, sock) in socks
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| s.as_ref().map(|s| (i, s)))
+            {
+                read_set.insert(sock.as_fd());
+                if sock.as_raw_fd() >= max_fd {
+                    max_fd = sock.as_raw_fd() + 1;
                 }
             }
             if max_fd == 0 {
@@ -321,10 +327,13 @@ impl RxPoller {
                 Ok(0) => return None,
                 Ok(_) => {
                     self.ready.clear();
-                    for sock in socks.iter().flatten() {
-                        let fd = sock.as_raw_fd();
-                        if read_set.contains(unsafe { BorrowedFd::borrow_raw(fd) }) {
-                            self.ready.push(fd);
+                    for (i, sock) in socks
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, s)| s.as_ref().map(|s| (i, s)))
+                    {
+                        if read_set.contains(sock.as_fd()) {
+                            self.ready.push(i);
                         }
                     }
                 }

@@ -1,5 +1,6 @@
 use clap::Parser;
 use std::net::{SocketAddrV4, UdpSocket};
+use std::os::unix::io::{AsFd, AsRawFd};
 use std::time::{Duration, Instant};
 
 use crate::diskio::DiskConfig;
@@ -183,50 +184,51 @@ fn recv_from_any_negotiate(
     port_base: u16,
     timeout: Option<Duration>,
 ) -> Option<(usize, std::net::SocketAddr)> {
-    use std::os::unix::io::{AsRawFd, BorrowedFd};
     use nix::sys::select::{select, FdSet};
     use nix::sys::time::TimeVal;
 
-    let fds: Vec<(usize, i32)> = socks.iter().enumerate()
-        .filter_map(|(i, s)| s.as_ref().map(|s| (i, s.as_raw_fd())))
+    // Indices of the populated sockets; drive select() straight from the
+    // live UdpSockets (AsFd) — no raw-fd bookkeeping needed.
+    let idxs: Vec<usize> = socks
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| s.as_ref().map(|_| i))
         .collect();
-    if fds.is_empty() {
+    if idxs.is_empty() {
         return None;
     }
 
     loop {
         let mut read_set = FdSet::new();
         let mut max_fd = 0i32;
-        for &(_, fd) in &fds {
-            let bfd = unsafe { BorrowedFd::borrow_raw(fd) };
-            read_set.insert(bfd);
-            if fd >= max_fd {
-                max_fd = fd + 1;
+        for i in &idxs {
+            let sock = socks[*i].as_ref().unwrap();
+            read_set.insert(sock.as_fd());
+            if sock.as_raw_fd() >= max_fd {
+                max_fd = sock.as_raw_fd() + 1;
             }
         }
         let mut tv = timeout.map(|d| TimeVal::new(d.as_secs() as i64, d.subsec_micros() as i64));
         match select(max_fd, Some(&mut read_set), None, None, tv.as_mut()) {
             Ok(0) => return None,
             Ok(_) => {
-                for &(idx, fd) in &fds {
-                    let bfd = unsafe { BorrowedFd::borrow_raw(fd) };
-                    if read_set.contains(bfd) {
-                        if let Some(sock) = &socks[idx] {
-                            sock.set_nonblocking(true).ok();
-                            match sock.recv_from(buf) {
-                                Ok((n, from)) => {
-                                    let from_v4 = match from {
-                                        std::net::SocketAddr::V4(v4) => v4,
-                                        _ => continue,
-                                    };
-                                    if from_v4.port() == socklib::SENDER_PORT(port_base)
-                                        || from_v4.port() == socklib::RECEIVER_PORT(port_base)
-                                    {
-                                        return Some((n, from));
-                                    }
+                for i in &idxs {
+                    let sock = socks[*i].as_ref().unwrap();
+                    if read_set.contains(sock.as_fd()) {
+                        sock.set_nonblocking(true).ok();
+                        match sock.recv_from(buf) {
+                            Ok((n, from)) => {
+                                let from_v4 = match from {
+                                    std::net::SocketAddr::V4(v4) => v4,
+                                    _ => continue,
+                                };
+                                if from_v4.port() == socklib::SENDER_PORT(port_base)
+                                    || from_v4.port() == socklib::RECEIVER_PORT(port_base)
+                                {
+                                    return Some((n, from));
                                 }
-                                Err(_) => continue,
                             }
+                            Err(_) => continue,
                         }
                     }
                 }
@@ -634,17 +636,19 @@ fn start_receiver(
     }
 
     let orig_out = crate::diskio::open_out_file(disk_config);
-    let mut pipe_pid = 0i32;
-    let piped_out = crate::diskio::open_pipe_receiver(orig_out, disk_config, &mut pipe_pid);
+    // C's open_pipe_receiver: the `-p` coprocess between the network
+    // receiver and the local writer; its stdout becomes our new output.
+    let mut pipe = crate::diskio::open_pipe_receiver(&orig_out, disk_config);
+    let out = pipe.as_ref().map(|p| &p.write_end).unwrap_or(&orig_out);
 
     let print_uncompressed_pos = crate::statistics::should_print_uncompressed_pos(
         stat_config.print_uncompressed_pos,
-        orig_out,
-        piped_out,
+        orig_out.raw_fd(),
+        out.raw_fd(),
     );
 
     let mut stats = ReceiverStats::new(
-        orig_out,
+        orig_out.raw_fd(),
         stat_config.stat_period,
         print_uncompressed_pos,
         stat_config.no_progress,
@@ -666,13 +670,20 @@ fn start_receiver(
         receive_timeout_secs: client_config.receive_timeout_secs,
         late_slices: client_config.late_slices.clone(),
     };
-    let net_config_clone = unsafe { std::ptr::read(net_config as *const NetConfig) };
+    // NetConfig/NetIf are plain data. A real clone gives the 'static thread
+    // its own copy of the Strings; the old `ptr::read` duplicated ownership
+    // of those Strings, which the original value then freed a second time —
+    // a double free.
+    let net_config_clone = net_config.clone();
     let stat_period = stat_config.stat_period;
     let no_progress = stat_config.no_progress;
+    // The stats in the receiver thread only need the fd number (it reads
+    // /proc self-stats); the OutFile itself stays here for the writer.
+    let orig_out_fd = orig_out.raw_fd();
 
     let receiver_thread = std::thread::spawn(move || {
         let mut stats_local = ReceiverStats::new(
-            orig_out,
+            orig_out_fd,
             stat_period,
             print_uncompressed_pos,
             no_progress,
@@ -681,12 +692,12 @@ fn start_receiver(
         stats_local.display(true);
     });
 
-    crate::diskio::writer(&fifo, piped_out);
+    crate::diskio::writer(&fifo, out);
 
     let _ = receiver_thread.join();
 
-    if pipe_pid != 0 {
-        let _ = crate::process::wait_for_process(pipe_pid, "Pipe");
+    if let Some(p) = &mut pipe {
+        let _ = crate::process::wait_for_child(&mut p.child, "Pipe");
     }
 
     stats.display(true);

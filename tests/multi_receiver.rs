@@ -42,9 +42,11 @@ fn two_receivers_gate_acks_and_retransmits() {
     let total = NR_DATA_SLICES as usize * SLICE_BYTES as usize;
 
     let fifo = Arc::new(Fifo::new(BLOCK));
-    for i in 0..total {
-        fifo.buffer_mut()[i] = source_byte(i);
-    }
+    fifo.with_buffer_mut(|buf| {
+        for i in 0..total {
+            buf[i] = source_byte(i);
+        }
+    });
     // Mirrors local_reader_fifo: reserve free memory before publishing data.
     fifo.free_mem_queue.consume(total);
     fifo.free_mem_queue.consumed(total);
@@ -108,7 +110,7 @@ fn two_receivers_gate_acks_and_retransmits() {
     let sock_c = sender_sock.clone();
     let db_c = db.clone();
     let sender_thread = std::thread::spawn(move || {
-        let buf: &[u8] = fifo_c.buffer();
+        let buf: &Mutex<Vec<u8>> = &fifo_c.buffer;
         senddata::spawn_net_sender(
             &fifo_c.data,
             &fifo_c.free_mem_queue,
@@ -459,7 +461,6 @@ fn fec_sender_advertises_cap_fec_on_the_wire() {
     // blocks with the right header, and each parity block must equal a
     // fresh Reed-Solomon encoding of the slice's data blocks (the same
     // per-stripe layout the receiver relies on).
-    udpcast::fec::fec_init();
     for s in 0..nr_slices {
         let d = data
             .get(&(s as i32))
