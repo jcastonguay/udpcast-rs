@@ -1,6 +1,6 @@
 # udpcast-rust
 
-A from-scratch Rust reimplementation of [udpcast](http://udpcast.linux.lu/),
+A vibe coded Rust re-implementation of [udpcast](http://udpcast.linux.lu/),
 the single-sender / many-receiver UDP multicasting tool for file transfer
 and live streaming.
 
