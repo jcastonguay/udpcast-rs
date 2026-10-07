@@ -1,0 +1,18 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:best-practices",
+    ":automergeMinor",
+    ":automergeLinters",
+    ":automergeTesters",
+    ":docker",
+    ":enableVulnerabilityAlerts",
+    ":enablePreCommit",
+    ":renovatePrefix",
+    "replacements:all",
+    "workarounds:all",
+    "schedule:automergeDaily",
+    "security:minimumReleaseAgeNpm",
+    "security:minimumReleaseAgePypi"
+  ]
+}
