@@ -140,7 +140,7 @@ impl Console {
         }
         let mut ch = [0u8; 1];
         // A zero-length read means EOF rather than a keystroke.
-        match unistd::read(self.fd.raw_fd(), &mut ch) {
+        match unistd::read(self.fd.as_fd(), &mut ch) {
             Ok(n) if n > 0 => Some(ch[0]),
             _ => None,
         }

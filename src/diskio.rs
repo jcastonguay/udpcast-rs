@@ -71,7 +71,7 @@ impl InFile {
         match &self.inner {
             // Same sequential read(2) the C code does; works through the
             // shared handle (no &mut File needed).
-            InInner::File(f) => nix::unistd::read(f.as_raw_fd(), buf).map_err(io::Error::other),
+            InInner::File(f) => nix::unistd::read(f.as_fd(), buf).map_err(io::Error::other),
             InInner::Stdin => {
                 let mut sin = std::io::stdin();
                 sin.read(buf)
